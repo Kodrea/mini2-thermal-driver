@@ -1,0 +1,226 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Device Tree Overlay for Infisense RS300 Thermal Camera on Radxa Rock 5B+
+ * CIF DIRECT PATH - Bypasses ISP entirely
+ *
+ * Architecture: Direct CIF Capture (No ISP Processing)
+ * ===========================================================
+ * This overlay routes through rkcif_mipi_lvds2 for direct DMA to memory,
+ * completely bypassing the ISP (Image Signal Processor).
+ *
+ * Video Pipeline:
+ *   RS300@3c -> i2c3 -> csi2_dphy0 -> mipi2_csi2 -> rkcif_mipi_lvds2 -> /dev/videoX
+ *
+ * Why CIF Direct for Thermal:
+ *   - Zero image processing applied to thermal data
+ *   - No color correction, white balance, or gamma curves
+ *   - Lowest possible latency path
+ *   - Raw 16-bit thermal data preserved exactly
+ *
+ * Camera Details:
+ *   - Infisense RS300, MIPI CSI-2, 2 data lanes @ 80MHz
+ *   - I2C address: 0x3c (7-bit)
+ *   - Self-powered: CSI 3.3V -> boost to 5V internal
+ *   - Internal oscillator (no external MCLK required)
+ *   - Mode 2: 384x288 @ 60fps (YUYV)
+ *
+ * Pixel Format Note:
+ *   Driver declares MEDIA_BUS_FMT_YUYV8_2X8, but userspace must request
+ *   pixelformat=UYVY. rkcif passes MIPI bytes through without swapping.
+ *   If RK3588 VICAP swaps bytes, change driver bus format to UYVY8_2X8.
+ *
+ * Compilation:
+ *   cpp -nostdinc -I /usr/src/linux-headers-$(uname -r)/include \
+ *       -undef -x assembler-with-cpp rock-5b-plus-rs300-cam0.dts | \
+ *     dtc -@ -I dts -O dtb -o rock-5b-plus-rs300-cam0.dtbo
+ *
+ * Installation:
+ *   sudo cp rock-5b-plus-rs300-cam0.dtbo /boot/dtbo/
+ *   sudo rsetup  # Enable the overlay, or manually remove .disabled suffix
+ *   sudo reboot
+ */
+/dts-v1/;
+/plugin/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+
+/ {
+	metadata {
+		title = "Enable RS300 Thermal Camera on CAM0";
+		compatible = "radxa,rock-5b-plus";
+		category = "camera";
+		exclusive = "csi2_dphy0";
+		description = "Enable Infisense RS300 thermal camera on CAM0 (CIF direct, 2-lane MIPI CSI-2, I2C 0x3c).";
+	};
+};
+
+/* Fragment 0: Root-level fixed clock and power regulator */
+&{/} {
+	clk_cam0_24m: clk-cam0-24m {
+		compatible = "fixed-clock";
+		clock-frequency = <24000000>;
+		clock-output-names = "clk_cam0_24m";
+		#clock-cells = <0>;
+	};
+
+	/*
+	 * Single regulator-fixed for camera power control.
+	 * RS300 is self-powered (3.3V from CSI -> internal boost to 5V).
+	 * All three driver supply names (dovdd, avdd, dvdd) map here.
+	 * regulator-always-on ensures power before I2C probe.
+	 */
+	cam0_pwren: cam0-pwren {
+		compatible = "regulator-fixed";
+		regulator-name = "cam0_pwren";
+		regulator-always-on;
+		regulator-boot-on;
+		enable-active-high;
+		gpio = <&gpio1 RK_PB0 GPIO_ACTIVE_HIGH>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam0_pwren_gpio>;
+	};
+};
+
+/* Fragment 1: I2C3 — RS300 sensor node at address 0x3c */
+&i2c3 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	rs300: rs300@3c {
+		compatible = "infisense,rs300";
+		reg = <0x3c>;
+		clocks = <&clk_cam0_24m>;
+		clock-names = "xvclk";
+
+		dovdd-supply = <&cam0_pwren>;
+		avdd-supply = <&cam0_pwren>;
+		dvdd-supply = <&cam0_pwren>;
+
+		/*
+		 * Reset GPIO — RS300 has internal pull-up on NRST.
+		 * The driver uses devm_gpiod_get_optional() so this is optional.
+		 * Uncomment if reset control is needed:
+		 * reset-gpios = <&gpio4 RK_PA0 GPIO_ACTIVE_LOW>;
+		 */
+
+		rockchip,camera-module-index = <0>;
+		rockchip,camera-module-facing = "back";
+		rockchip,camera-module-name = "RS300";
+		rockchip,camera-module-lens-name = "default";
+
+		status = "okay";
+
+		port {
+			rs300_out0: endpoint {
+				remote-endpoint = <&mipidphy0_in_ucam0>;
+				bus-type = <4>; /* MIPI CSI-2 D-PHY */
+				data-lanes = <1 2>;
+				link-frequencies = /bits/ 64 <80000000>;
+				clock-noncontinuous;
+			};
+		};
+	};
+};
+
+/* Fragment 2: Enable physical DPHY hardware block */
+&csi2_dphy0_hw {
+	status = "okay";
+};
+
+/* Fragment 3: Enable logical DPHY0 (full mode, 4-lane capable, using 2 lanes) */
+&csi2_dphy0 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			mipidphy0_in_ucam0: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&rs300_out0>;
+				data-lanes = <1 2>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			csidphy0_out: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&mipi2_csi2_input>;
+			};
+		};
+	};
+};
+
+/* Fragment 4: Enable CSI2 host controller mipi2_csi2 */
+&mipi2_csi2 {
+	status = "okay";
+
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		port@0 {
+			reg = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			mipi2_csi2_input: endpoint@1 {
+				reg = <1>;
+				remote-endpoint = <&csidphy0_out>;
+			};
+		};
+
+		port@1 {
+			reg = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			mipi2_csi2_output: endpoint@0 {
+				reg = <0>;
+				remote-endpoint = <&cif_mipi2_in0>;
+			};
+		};
+	};
+};
+
+/* Fragment 5: Enable parent rkcif */
+&rkcif {
+	status = "okay";
+};
+
+/* Fragment 6: Enable rkcif capture node for CAM0 (CIF direct path) */
+&rkcif_mipi_lvds2 {
+	status = "okay";
+
+	port {
+		cif_mipi2_in0: endpoint {
+			remote-endpoint = <&mipi2_csi2_output>;
+		};
+	};
+};
+
+/* Fragment 7: Enable rkcif MMU (required for DMA) */
+&rkcif_mmu {
+	status = "okay";
+};
+
+/* Fragment 8: Pinctrl for camera power GPIO */
+&pinctrl {
+	camera {
+		cam0_pwren_gpio: cam0-pwren-gpio {
+			rockchip,pins = <1 RK_PB0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+	};
+};
+
