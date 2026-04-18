@@ -3,16 +3,15 @@
 # RS300 Thermal Camera — Rock 5B+ (RK3588) Install Script
 #
 # Installs the RS300 driver via DKMS, enables the DT overlay, and
-# applies the H_BLACKLIST kernel cmdline fix that lets the driver bind
-# on the stock Radxa BSP kernel (6.1.84-8-rk2410).
+# applies the initcall_blacklist=rkcif_clr_unready_dev kernel cmdline
+# parameter required for the driver to bind on the stock Radxa BSP
+# kernel.
 #
 # Background:
 #   The Rockchip BSP kernel fires a late_initcall(rkcif_clr_unready_dev)
 #   that force-empties the V4L2 async notifier's waiting list before any
 #   DKMS module can load. Blacklisting that single initcall keeps the
 #   waiting list open so the userspace-loaded rs300 module binds cleanly.
-#   Evidence: rs300-kb/evidence/h1-phase2-verdict-2026-04-15/
-#             H_BLACKLIST-VERDICT.md + H_BLACKLIST-FOLLOWUP.md
 #
 # Usage: sudo ./install.sh
 
@@ -66,38 +65,21 @@ else
 fi
 ok "Rock 5B+ (RK3588) detected"
 
-# ── Kernel-state detection ───────────────────────────────────────────────────
-# Two supported paths:
-#   A) Stock Radxa BSP (CONFIG_VIDEO_RS300 not set, CONFIG_VIDEO_ROCKCHIP_CIF=y)
-#      → install DKMS, overlay, AND the H_BLACKLIST cmdline param.
-#   B) Custom kernel with rs300 built in (CONFIG_VIDEO_RS300=y, e.g. -999)
-#      → install overlay only; DKMS is inert, cmdline param not needed.
-info "Detecting kernel configuration..."
+# ── Kernel check ─────────────────────────────────────────────────────────────
+info "Checking kernel configuration..."
 KCONFIG="/boot/config-$(uname -r)"
 if [ ! -r "$KCONFIG" ]; then
     fail "Cannot read $KCONFIG — kernel config missing or unreadable."
 fi
-HAS_RS300_BUILTIN=$(grep -qE '^CONFIG_VIDEO_RS300=y' "$KCONFIG" && echo 1 || echo 0)
-HAS_CIF_BUILTIN=$(grep -qE '^CONFIG_VIDEO_ROCKCHIP_CIF=y' "$KCONFIG" && echo 1 || echo 0)
-
-if [ "$HAS_RS300_BUILTIN" = "1" ]; then
-    INSTALL_MODE="builtin"
-    ok "Built-in rs300 kernel detected — overlay-only install (skipping cmdline + DKMS)"
-elif [ "$HAS_CIF_BUILTIN" = "1" ]; then
-    INSTALL_MODE="blacklist"
-    ok "Stock BSP detected — H_BLACKLIST install (DKMS + overlay + cmdline param)"
-else
-    fail "Neither CONFIG_VIDEO_RS300=y nor CONFIG_VIDEO_ROCKCHIP_CIF=y in $KCONFIG.
-  This kernel does not match either supported RS300 install path on RK3588.
-  See rs300-kb/evidence/h1-phase2-verdict-2026-04-15/H_BLACKLIST-VERDICT.md"
+if ! grep -qE '^CONFIG_VIDEO_ROCKCHIP_CIF=y' "$KCONFIG"; then
+    fail "CONFIG_VIDEO_ROCKCHIP_CIF=y not set in $KCONFIG.
+  This installer supports the stock Radxa BSP kernel only."
 fi
+ok "Stock Radxa BSP kernel detected"
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 info "Checking dependencies..."
-REQUIRED_PKGS="device-tree-compiler"
-if [ "$INSTALL_MODE" = "blacklist" ]; then
-    REQUIRED_PKGS="$REQUIRED_PKGS dkms"
-fi
+REQUIRED_PKGS="device-tree-compiler dkms"
 
 MISSING=""
 for pkg in $REQUIRED_PKGS; do
@@ -106,11 +88,9 @@ for pkg in $REQUIRED_PKGS; do
     fi
 done
 
-if [ "$INSTALL_MODE" = "blacklist" ]; then
-    KDIR="/lib/modules/$(uname -r)/build"
-    if [ ! -d "$KDIR" ]; then
-        MISSING="$MISSING linux-headers-$(uname -r)"
-    fi
+KDIR="/lib/modules/$(uname -r)/build"
+if [ ! -d "$KDIR" ]; then
+    MISSING="$MISSING linux-headers-$(uname -r)"
 fi
 
 if [ -n "$MISSING" ]; then
@@ -120,37 +100,33 @@ if [ -n "$MISSING" ]; then
 fi
 ok "Dependencies satisfied"
 
-# ── DKMS module (blacklist mode only) ────────────────────────────────────────
-if [ "$INSTALL_MODE" = "blacklist" ]; then
-    info "Installing kernel module via DKMS..."
+# ── DKMS module ──────────────────────────────────────────────────────────────
+info "Installing kernel module via DKMS..."
 
-    if /usr/sbin/dkms status 2>/dev/null | grep -q "${DRV_NAME}/${DRV_VERSION}"; then
-        warn "Removing existing DKMS registration"
-        /usr/sbin/dkms remove -m "$DRV_NAME" -v "$DRV_VERSION" --all 2>/dev/null || true
-    fi
-
-    mkdir -p "$DKMS_SRC"
-    cp "${SCRIPT_DIR}/build/dkms.conf" "$DKMS_SRC/"
-    cp "${SCRIPT_DIR}/build/Makefile"  "$DKMS_SRC/"
-    cp "${SCRIPT_DIR}/src/rs300.c"     "$DKMS_SRC/"
-
-    /usr/sbin/dkms add     -m "$DRV_NAME" -v "$DRV_VERSION"
-    /usr/sbin/dkms build   -m "$DRV_NAME" -v "$DRV_VERSION"
-    /usr/sbin/dkms install -m "$DRV_NAME" -v "$DRV_VERSION"
-
-    ok "DKMS module installed: $(/usr/sbin/dkms status | grep "$DRV_NAME")"
-
-    # ── modules-load.d (userspace autoload at boot) ──────────────────────────
-    info "Enabling rs300 autoload via $MODULES_LOAD_FILE"
-    echo "rs300" > "$MODULES_LOAD_FILE"
-    ok "Autoload entry written"
-else
-    info "Skipping DKMS (rs300 already built in)"
+if /usr/sbin/dkms status 2>/dev/null | grep -q "${DRV_NAME}/${DRV_VERSION}"; then
+    warn "Removing existing DKMS registration"
+    /usr/sbin/dkms remove -m "$DRV_NAME" -v "$DRV_VERSION" --all 2>/dev/null || true
 fi
+
+mkdir -p "$DKMS_SRC"
+cp "${SCRIPT_DIR}/dkms.conf" "$DKMS_SRC/"
+cp "${SCRIPT_DIR}/Makefile"  "$DKMS_SRC/"
+cp "${SCRIPT_DIR}/src/rs300.c" "$DKMS_SRC/"
+
+/usr/sbin/dkms add     -m "$DRV_NAME" -v "$DRV_VERSION"
+/usr/sbin/dkms build   -m "$DRV_NAME" -v "$DRV_VERSION"
+/usr/sbin/dkms install -m "$DRV_NAME" -v "$DRV_VERSION"
+
+ok "DKMS module installed: $(/usr/sbin/dkms status | grep "$DRV_NAME")"
+
+info "Enabling rs300 autoload via $MODULES_LOAD_FILE"
+echo "rs300" > "$MODULES_LOAD_FILE"
+ok "Autoload entry written"
 
 # ── Device tree overlay ─────────────────────────────────────────────────────
 info "Building device tree overlay..."
 
+mkdir -p "${SCRIPT_DIR}/build"
 DTBO_FILE="${SCRIPT_DIR}/build/${OVERLAY_NAME}.dtbo"
 PREPROCESSED="/tmp/${OVERLAY_NAME}.dts.preprocessed"
 HEADERS_DIR="/usr/src/linux-headers-$(uname -r)/include"
@@ -196,21 +172,18 @@ else
 fi
 
 # ── Kernel cmdline: append initcall_blacklist ────────────────────────────────
-if [ "$INSTALL_MODE" = "blacklist" ]; then
-    info "Applying H_BLACKLIST kernel parameter"
-    if [ ! -f "$CMDLINE_FILE" ]; then
-        fail "$CMDLINE_FILE not found — cannot apply cmdline param. Is u-boot-menu installed?"
-    fi
-    if grep -q "$BLACKLIST_TOKEN" "$CMDLINE_FILE"; then
-        ok "H_BLACKLIST already present in $CMDLINE_FILE"
-    else
-        backup_once "$CMDLINE_FILE"
-        # Keep on one line; append with a leading space if the file has content.
-        CURRENT=$(tr -d '\n' < "$CMDLINE_FILE")
-        NEW="${CURRENT:+$CURRENT }$BLACKLIST_TOKEN"
-        printf '%s\n' "$NEW" > "$CMDLINE_FILE"
-        ok "Appended $BLACKLIST_TOKEN"
-    fi
+info "Applying blacklist kernel parameter"
+if [ ! -f "$CMDLINE_FILE" ]; then
+    fail "$CMDLINE_FILE not found — cannot apply cmdline param. Is u-boot-menu installed?"
+fi
+if grep -q "$BLACKLIST_TOKEN" "$CMDLINE_FILE"; then
+    ok "Blacklist already present in $CMDLINE_FILE"
+else
+    backup_once "$CMDLINE_FILE"
+    CURRENT=$(tr -d '\n' < "$CMDLINE_FILE")
+    NEW="${CURRENT:+$CURRENT }$BLACKLIST_TOKEN"
+    printf '%s\n' "$NEW" > "$CMDLINE_FILE"
+    ok "Appended $BLACKLIST_TOKEN"
 fi
 
 # ── Regenerate extlinux.conf ─────────────────────────────────────────────────
@@ -222,10 +195,10 @@ if command -v /usr/sbin/u-boot-update >/dev/null 2>&1; then
     else
         warn "Overlay not found in extlinux.conf — check $UBOOT_DEFAULTS"
     fi
-    if [ "$INSTALL_MODE" = "blacklist" ] && grep -q "$BLACKLIST_TOKEN" /boot/extlinux/extlinux.conf 2>/dev/null; then
-        ok "H_BLACKLIST present in extlinux.conf"
-    elif [ "$INSTALL_MODE" = "blacklist" ]; then
-        warn "H_BLACKLIST not in extlinux.conf — check $CMDLINE_FILE"
+    if grep -q "$BLACKLIST_TOKEN" /boot/extlinux/extlinux.conf 2>/dev/null; then
+        ok "Blacklist present in extlinux.conf"
+    else
+        warn "Blacklist not in extlinux.conf — check $CMDLINE_FILE"
     fi
 else
     warn "u-boot-update not found"
