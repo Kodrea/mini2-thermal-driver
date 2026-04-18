@@ -2,7 +2,7 @@
 
 Linux kernel driver for the Infisense RS300 thermal camera on the Radxa Zero 3W. Installs via DKMS on the stock Radxa Bookworm BSP kernel.
 
-**Status:** Verification in progress. Driver + overlay were captured from a working reference board (300-frame stream at 60 fps on a custom kernel with `rkcif_clr_unready_dev` patched out at source). The stock-BSP blacklist install path has not yet been verified end-to-end on this platform.
+**Verified:** factory Radxa kernel `6.1.84-10-rk2410-nocsf` on the `radxa-zero3_bookworm_kde_b1` image, 300-frame stream at 60 fps, 2026-04-18. The blacklist workaround was confirmed necessary on this platform via a reproducible A/B test (see the Blacklist section below).
 
 ## Prerequisites
 
@@ -56,15 +56,28 @@ Useful for reproducing the "driver loads but doesn't bind" failure mode on a sto
 
 ## The blacklist parameter — when it applies
 
-On Rockchip stock BSP kernels, a `late_initcall(rkcif_clr_unready_dev)` fires at boot and force-empties the V4L2 async notifier's waiting list before any DKMS-loaded module can register. The rs300 driver loads into a kernel that has already discarded its pending-sensor list, so it never binds. The fix is a single kernel cmdline parameter:
+On Rockchip stock BSP kernels a `late_initcall(rkcif_clr_unready_dev)` fires at boot and closes the rkcif V4L2 async subdev notifier before any DKMS-loaded module can register with it. The fix is a single kernel cmdline parameter:
 
 ```
 initcall_blacklist=rkcif_clr_unready_dev
 ```
 
-The installer writes this to `/etc/kernel/cmdline` and runs `u-boot-update` to regenerate `/boot/extlinux/extlinux.conf`. Without it on affected kernels, `lsmod` will show `rs300` loaded but the camera will not appear under `v4l2-ctl --list-devices`.
+The installer writes this to `/etc/kernel/cmdline` and runs `u-boot-update` to regenerate `/boot/extlinux/extlinux.conf`.
 
-Custom kernels with the offending initcall removed at source (e.g. Radxa's `-nocsf` user-customized builds that have applied a local patch) do not need the blacklist — the installer detects this and skips the step.
+### The failure signature without the blacklist
+
+The symptoms are subtle because the rs300 module still loads and still binds at the I2C layer. Observed on a factory Zero 3W without the blacklist:
+
+- `lsmod | grep rs300` shows it loaded
+- `i2cdetect -y 2` shows `UU` at `0x3c` (misleading — it indicates the I2C device is reserved by the driver, not that capture works)
+- `v4l2-ctl --list-devices` shows `rkcif` with `/dev/video0` through `/dev/video7`
+- **`v4l2-ctl -d /dev/video0 --get-fmt-video` fails with `No such device`**
+- `v4l2-ctl -d /dev/video7 --stream-mmap` fails with `VIDIOC_REQBUFS returned -1 (Device or resource busy)`
+- dmesg shows `rkcif rkcif_mipi_lvds: clear unready subdev num: 1` early at boot, followed by `rkcif_mipi_lvds: Async subdev notifier completed` *before* rs300 has loaded, and later a flood of `rkcif_update_sensor_info: stream[N] get remote terminal sensor failed!`
+
+With the blacklist applied the kernel logs `blacklisting initcall rkcif_clr_unready_dev` at boot, the async notifier waits until rs300 registers (typically around t=18s), then `Async subdev notifier completed` fires cleanly and `/dev/video0` becomes usable.
+
+Custom kernels with `rkcif_clr_unready_dev` removed at source do not need the blacklist. The installer detects this via `/proc/kallsyms` and skips the cmdline step automatically.
 
 ## Verify After Reboot
 
