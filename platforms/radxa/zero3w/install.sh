@@ -229,7 +229,7 @@ if [ "$INSTALL_MODE" = "blacklist" ]; then
         ok "Appended $BLACKLIST_TOKEN"
     fi
 elif [ "$INSTALL_MODE" = "dkms-only-forced" ]; then
-    warn "Blacklist SKIPPED (NO_BLACKLIST=1). Driver will load but may not bind on stock BSP kernels."
+    warn "Blacklist SKIPPED (NO_BLACKLIST=1). On stock BSP kernels rs300 will load and bind I2C (UU at 0x3c) but /dev/video0 will not be functional."
 fi
 
 # ── Regenerate extlinux.conf ─────────────────────────────────────────────────
