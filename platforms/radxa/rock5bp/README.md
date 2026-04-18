@@ -18,14 +18,9 @@ sudo ./install.sh
 sudo reboot
 ```
 
-The installer auto-detects the kernel configuration and selects the correct install path:
+The installer builds the rs300 module via DKMS, compiles and installs the device tree overlay, registers the overlay with `u-boot-update`, and appends the required kernel cmdline parameter. A reboot applies everything.
 
-| Kernel | Path | What the installer does |
-|-|-|-|
-| Stock BSP (`CONFIG_VIDEO_ROCKCHIP_CIF=y`) | DKMS + overlay + blacklist | Installs DKMS module, compiles overlay, writes blacklist cmdline param |
-| Custom kernel (`CONFIG_VIDEO_RS300=y`) | Overlay only | Compiles and installs overlay; skips DKMS and blacklist |
-
-## The Blacklist Parameter (Required on Stock BSP)
+## The Blacklist Parameter
 
 The stock Radxa BSP kernel fires `late_initcall(rkcif_clr_unready_dev)` at boot. This call force-empties the V4L2 async notifier's waiting list before any DKMS-loaded module can register. The rs300 driver loads too late and never binds.
 
@@ -97,7 +92,7 @@ cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp \
 echo 'U_BOOT_FDT_OVERLAYS="rock-5b-plus-rs300-cam0.dtbo"' \
   | sudo tee -a /etc/default/u-boot
 
-# Apply blacklist (stock BSP only)
+# Apply blacklist
 CURRENT=$(sudo cat /etc/kernel/cmdline)
 echo "$CURRENT initcall_blacklist=rkcif_clr_unready_dev" \
   | sudo tee /etc/kernel/cmdline
