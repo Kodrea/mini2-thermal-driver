@@ -20,7 +20,7 @@ Linux kernel driver for the Mini2 / WN2 thermal camera module (Infisense RS300).
 | Platform | SoC | Status | Install |
 |-|-|-|-|
 | Rock 5B+ | RK3588 | Working | [platforms/radxa/rock5bp](platforms/radxa/rock5bp/README.md) |
-| Zero 3W | RK3566 | Verification in progress | [platforms/radxa/zero3w](platforms/radxa/zero3w/README.md) |
+| Zero 3W | RK3566 | Working | [platforms/radxa/zero3w](platforms/radxa/zero3w/README.md) |
 
 ### NVIDIA
 
