@@ -137,7 +137,7 @@ if grep -qE "^camera_auto_detect=1" "$CONFIG_FILE"; then
 elif grep -qE "^camera_auto_detect=0" "$CONFIG_FILE"; then
     ok "camera_auto_detect already 0"
 else
-    warn "camera_auto_detect line not found — adding"
+    warn "camera_auto_detect line not found, adding"
     echo "camera_auto_detect=0" >> "$CONFIG_FILE"
 fi
 
