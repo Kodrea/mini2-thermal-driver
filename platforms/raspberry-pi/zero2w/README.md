@@ -78,7 +78,7 @@ wait
 
 ## Known limitations
 
-The Pi Zero 2W has limited CPU and memory resources. The driver filters the supported-modes list to `384x288` only. The `640x512` and `256x192` modules are disabled on this platform.
+Pi Zero 2W has limited CPU and memory. The `640x512` module is known to have difficulty sustaining full frame rates: 60 fps is unlikely without running headless and minimising background services. The `384x288` and `256x192` modules are less affected.
 
 ## Files
 
