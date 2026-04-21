@@ -13,7 +13,7 @@ Linux kernel driver for the Mini2 / WN2 thermal camera module (Infisense RS300).
 | Raspberry Pi 5 | BCM2712 | Working | [platforms/raspberry-pi/rpi5](platforms/raspberry-pi/rpi5/README.md) |
 | Raspberry Pi 4B | BCM2711 | Refactoring | [platforms/raspberry-pi/rpi4b](platforms/raspberry-pi/rpi4b/README.md) |
 | Raspberry Pi CM5 | BCM2712 | Coming soon | [platforms/raspberry-pi/cm5](platforms/raspberry-pi/cm5/README.md) |
-| Raspberry Pi Zero 2W | BCM2710 | Working (see notes) | [platforms/raspberry-pi/zero2w](platforms/raspberry-pi/zero2w/README.md) |
+| Raspberry Pi Zero 2W | BCM2710 | Working | [platforms/raspberry-pi/zero2w](platforms/raspberry-pi/zero2w/README.md) |
 
 ### Radxa
 
