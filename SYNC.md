@@ -33,11 +33,21 @@ Known intentional divergences:
 | `rs300_get_mbus_config` | rock5bp, zero3w | Rockchip BSP callback |
 | `rs300_g_frame_interval` | rock5bp, zero3w | Rockchip BSP callback |
 | `RKMODULE_*` DT property reads in probe | rock5bp, zero3w | Rockchip BSP requirement |
-| `MEDIA_BUS_FMT_YUYV8_2X8` in `supported_modes`, `get_fmt`, and `pixel_rate` init | zero2w | `bcm2835-unicam-legacy` (BCM2710) does not accept Y16 passthrough; rpi5 uses `unicam_csi2` which does |
+| `MEDIA_BUS_FMT_YUYV8_2X8` in `supported_modes`, `get_fmt`, and `pixel_rate` init | zero2w, rpi4b | `bcm2835-unicam-legacy` (BCM2710 / BCM2711 / BCM2837) does not accept Y16 passthrough; rpi5 uses `unicam_csi2` which does |
 
 Rockchip platforms (rock5bp, zero3w) also share the same install path: DKMS + overlay + `initcall_blacklist=rkcif_clr_unready_dev`.
 
 When propagating a fix, skip these blocks on non-Rockchip platforms.
+
+## Platform alignment
+
+Some platforms intentionally carry byte-identical copies because they share the same driver path at the kernel level.
+
+| Platforms | Relationship | Notes |
+|-|-|-|
+| rpi4b, zero2w | Identical `rs300.c`, overlay, `Makefile`, `dkms.conf` | Both use `bcm2835-unicam-legacy`. A fix to one must be mirrored to the other. |
+
+A fix to a file in a paired platform should update all paired copies in the same PR.
 
 ## Propagation Process
 
