@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Definitions for RS300 camera module on Raspberry Pi Zero 2W (BCM2837, legacy Unicam)
+// Definitions for RS300 camera module on Raspberry Pi Zero 2W (BCM2710, legacy Unicam)
 /dts-v1/;
 /plugin/;
 
