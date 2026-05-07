@@ -398,7 +398,7 @@ install_kernel_module() {
     echo ""
 
     # Remove old version if exists
-    if dkms status | grep -q "${DRV_NAME}"; then
+    if sudo dkms status | grep -q "${DRV_NAME}"; then
         print_status "Removing previous installation..."
         sudo dkms remove -m ${DRV_NAME} -v ${DRV_VERSION} --all 2>/dev/null || true
     fi
@@ -408,7 +408,7 @@ install_kernel_module() {
 
     # Copy source files
     print_status "Copying source files..."
-    sudo cp build/dkms.conf build/Makefile src/rs300.c /usr/src/${DRV_NAME}-${DRV_VERSION}/
+    sudo cp dkms.conf Makefile src/rs300.c /usr/src/${DRV_NAME}-${DRV_VERSION}/
 
     # Add to DKMS
     print_status "Adding to DKMS..."
@@ -661,7 +661,7 @@ show_next_steps() {
     echo "Configuration:"
     echo "  Module params: /etc/modprobe.d/rs300.conf"
     echo "  Init script:   /usr/lib/rs300/rs300-init.sh"
-    echo "  Uninstall:     sudo ./build/uninstall.sh"
+    echo "  Uninstall:     sudo dkms remove -m ${DRV_NAME} -v ${DRV_VERSION} --all"
     echo ""
 }
 
