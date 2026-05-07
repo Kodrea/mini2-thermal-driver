@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
-"""mini2-384 thermal stream — fullscreen Gtk viewer with keyboard controls.
+"""mini2 thermal stream — fullscreen Gtk viewer with keyboard controls.
 
-Drives the rs300 V4L2 driver on a Raspberry Pi 5 (mode=2, 384x288 YUYV @ 60fps).
-gtksink embeds the GStreamer video as a native Gtk widget so the surrounding
-window receives key events directly. v4l2 control changes go through v4l2-ctl
-subprocess calls on the sensor subdev. Keys are accepted from either the
-fullscreen video window OR the launching terminal (when stdin is a tty).
+Drives the rs300 V4L2 driver on a Raspberry Pi 5. Resolution is auto-detected
+from the sensor subdev at startup (supports 256x192, 384x288, 640x512 YUYV
+@ 60fps). gtksink embeds the GStreamer video as a native Gtk widget so the
+surrounding window receives key events directly. v4l2 control changes go
+through v4l2-ctl subprocess calls on the sensor subdev. Keys are accepted from
+either the fullscreen video window OR the launching terminal (when stdin is a
+tty).
+
+Logging: every v4l2-ctl call is logged to stderr and appended to
+/tmp/rs300-stream.log (file is opened at startup; each run appends).
 """
 import atexit
+import datetime
 import os
 import signal
 import subprocess
@@ -51,19 +57,100 @@ from gi.repository import Gdk, GLib, Gst, Gtk  # noqa: E402
 
 DEV_VIDEO = '/dev/video0'
 SUBDEV = '/dev/v4l-subdev2'
-WIDTH = 384
-HEIGHT = 288
+LOG_FILE = '/tmp/rs300-stream.log'
 FPS = 60
 
+# Opened at module load; each run appends so previous logs are preserved.
+_log_fh = open(LOG_FILE, 'a')
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def _ts():
+    return datetime.datetime.now().strftime('%H:%M:%S.') + \
+        f'{datetime.datetime.now().microsecond // 1000:03d}'
+
+
+def _log(msg):
+    line = f'[{_ts()}] {msg}\n'
+    sys.stderr.write(line)
+    sys.stderr.flush()
+    _log_fh.write(line)
+    _log_fh.flush()
+
+
+def _run_v4l2(cmd):
+    """Run a v4l2-ctl command, log the call and result, return CompletedProcess."""
+    _log(f'CMD: {" ".join(cmd)}')
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    parts = [f'RC={result.returncode}']
+    if stdout:
+        parts.append(f'stdout="{stdout}"')
+    if stderr:
+        parts.append(f'stderr="{stderr}"')
+    if not stdout and not stderr:
+        parts.append('(no output)')
+    _log(' '.join(parts))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Resolution auto-detection
+# ---------------------------------------------------------------------------
+
+def _detect_resolution():
+    """Query subdev format and return (width, height). Falls back to 384x288."""
+    result = _run_v4l2(['v4l2-ctl', '--get-subdev-fmt', 'pad=0', '-d', SUBDEV])
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith('Width/Height'):
+            try:
+                _, vals = line.split(':', 1)
+                w_str, h_str = vals.strip().split('/')
+                w, h = int(w_str.strip()), int(h_str.strip())
+                print(f'Detected resolution: {w}x{h}', flush=True)
+                return w, h
+            except (ValueError, IndexError):
+                pass
+    print('WARNING: could not parse subdev resolution; falling back to 384x288',
+          file=sys.stderr, flush=True)
+    _log('Resolution parse failed — using fallback 384x288')
+    return 384, 288
+
+
+WIDTH, HEIGHT = _detect_resolution()
+
+
+def _propagate_csi_format(width, height):
+    """Force the Pi 5 CFE CSI-2 receiver pads (/dev/v4l-subdev0) to match the
+    rs300 source resolution. The rs300 driver does not push format changes
+    through the link, so without this the CFE sees the previous default
+    (typically 384x288) on its sink pads and rejects stream-on with
+    'Wrong width or height ...'. Workaround until the driver propagates."""
+    csi_dev = '/dev/v4l-subdev0'
+    if not os.path.exists(csi_dev):
+        return
+    for pad in (0, 1):
+        _run_v4l2(['v4l2-ctl', '--set-subdev-fmt',
+                   f'pad={pad},width={width},height={height},code=0x2011',
+                   '-d', csi_dev])
+
+
+_propagate_csi_format(WIDTH, HEIGHT)
+
 PIPELINE = (
-    f'v4l2src device={DEV_VIDEO} '
+    f'v4l2src name=src device={DEV_VIDEO} '
     f'! video/x-raw,format=YUY2,width={WIDTH},height={HEIGHT},framerate={FPS}/1 '
     f'! videoconvert '
     f'! gtksink name=sink sync=false'
 )
 
 KEYMAP_HELP = """\
-=== mini2-384 thermal controls (works in terminal OR video window) ===
+=== mini2 thermal controls (works in terminal OR video window) ===
   f         trigger FFC (flat-field correction)
   c         cycle colormap (0..11)
   m         cycle scene_mode (0..5)
@@ -77,19 +164,19 @@ KEYMAP_HELP = """\
 """
 
 
+# ---------------------------------------------------------------------------
+# v4l2 control helpers
+# ---------------------------------------------------------------------------
+
 def get_ctrl(name):
-    out = subprocess.run(
-        ['v4l2-ctl', '--get-ctrl', name, '-d', SUBDEV],
-        capture_output=True, text=True, check=True,
-    )
-    return int(out.stdout.split(':', 1)[1].strip())
+    result = _run_v4l2(['v4l2-ctl', '--get-ctrl', name, '-d', SUBDEV])
+    if result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, result.args)
+    return int(result.stdout.split(':', 1)[1].strip())
 
 
 def set_ctrl(name, value):
-    subprocess.run(
-        ['v4l2-ctl', f'--set-ctrl={name}={value}', '-d', SUBDEV],
-        check=False,
-    )
+    _run_v4l2(['v4l2-ctl', f'--set-ctrl={name}={value}', '-d', SUBDEV])
     print(f'{name}={value}', flush=True)
 
 
@@ -114,6 +201,10 @@ def quit_app(*_):
     Gtk.main_quit()
     return False
 
+
+# ---------------------------------------------------------------------------
+# Key dispatch
+# ---------------------------------------------------------------------------
 
 # Single source of truth for what each named action does. Both the Gdk
 # key-press handler (video window) and the stdin reader (terminal) dispatch
@@ -235,6 +326,10 @@ def _setup_stdin_reader():
     GLib.io_add_watch(fd, GLib.IO_IN | GLib.IO_HUP, on_input)
 
 
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
 def main():
     Gst.init(None)
     try:
@@ -248,14 +343,27 @@ def main():
     sink = pipeline.get_by_name('sink')
     video_widget = sink.props.widget
 
-    window = Gtk.Window(title='mini2-384 thermal')
+    window = Gtk.Window(title=f'mini2 thermal {WIDTH}x{HEIGHT}')
     window.set_default_size(WIDTH * 2, HEIGHT * 2)
     window.add(video_widget)
     window.set_can_focus(True)
     window.connect('destroy', quit_app)
     window.connect('key-press-event', on_gdk_key)
 
-    GLib.timeout_add_seconds(2, fire_ffc)
+    # Schedule FFC for 2s after the FIRST frame flows through v4l2src.
+    # Earlier triggers (e.g. 2s after script launch, or even at PAUSED->PLAYING
+    # state change) hit the sensor before it has produced any frames and the
+    # rs300 driver returns EIO on the I2C ffc command.
+    src_element = pipeline.get_by_name('src')
+    src_pad = src_element.get_static_pad('src')
+
+    def _on_first_buffer(pad, _info):
+        _log('first buffer from v4l2src — arming FFC for +2s')
+        GLib.timeout_add_seconds(2, fire_ffc)
+        return Gst.PadProbeReturn.REMOVE  # one-shot
+
+    src_pad.add_probe(Gst.PadProbeType.BUFFER, _on_first_buffer)
+
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, quit_app)
 
     _setup_stdin_reader()
