@@ -408,7 +408,7 @@ install_kernel_module() {
 
     # Copy source files
     print_status "Copying source files..."
-    sudo cp build/dkms.conf build/Makefile src/rs300.c /usr/src/${DRV_NAME}-${DRV_VERSION}/
+    sudo cp dkms.conf Makefile src/rs300.c /usr/src/${DRV_NAME}-${DRV_VERSION}/
 
     # Add to DKMS
     print_status "Adding to DKMS..."
