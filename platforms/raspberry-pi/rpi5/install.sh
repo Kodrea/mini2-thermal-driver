@@ -101,14 +101,13 @@ Examples:
 This script installs:
   - RS300 kernel module via DKMS
   - Device tree overlay
-  - Init script to /usr/lib/rs300/
-  - Systemd service for auto-init on boot
+  - rs300-stream live viewer to /usr/local/bin/
   - Module params to /etc/modprobe.d/rs300.conf
 
 After installation:
   1. Reboot: sudo reboot
   2. Verify: dmesg | grep rs300
-  3. Check init: systemctl status rs300-init
+  3. Preview: rs300-stream
 EOF
             exit 0
             ;;
@@ -337,8 +336,13 @@ install_dependencies() {
 
     local missing_pkgs=()
 
-    # Check each required package
-    for pkg in raspberrypi-kernel-headers dkms v4l-utils i2c-tools device-tree-compiler; do
+    # Check each required package. The gir1.2-* / gstreamer1.0-* / python3-gi
+    # packages back the rs300-stream live viewer (GTK + GStreamer).
+    for pkg in raspberrypi-kernel-headers dkms v4l-utils i2c-tools \
+               device-tree-compiler python3-gi python3-gi-cairo \
+               gir1.2-gtk-3.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+               gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+               gstreamer1.0-plugins-bad gstreamer1.0-gtk3; do
         if ! dpkg -l 2>/dev/null | grep -q "^ii  $pkg "; then
             missing_pkgs+=($pkg)
         fi
@@ -588,56 +592,24 @@ install_device_tree() {
 }
 
 # ============================================================================
-# INIT SCRIPT & SYSTEMD SERVICE
+# HELPER TOOLS
 # ============================================================================
 
-install_init_script() {
-    print_status "Installing init script and systemd service..."
+install_helpers() {
+    print_status "Installing helper tools..."
     echo ""
 
-    # Install init script
-    sudo mkdir -p /usr/lib/rs300
-    sudo cp examples/rs300-init.sh /usr/lib/rs300/rs300-init.sh
-    sudo chmod +x /usr/lib/rs300/rs300-init.sh
-    print_success "Init script installed to /usr/lib/rs300/rs300-init.sh"
+    # rs300-stream.py is the user-facing live viewer (GTK + GStreamer).
+    local stream_src="helpers/rs300-stream.py"
 
-    # Install systemd service
-    sudo cp examples/rs300-init.service /etc/systemd/system/rs300-init.service
-    sudo systemctl daemon-reload
-
-    # Ask to enable
-    local should_enable=false
-    if [ "$AUTO_MODE" = true ]; then
-        should_enable=true
-    else
-        read -p "Enable auto-init on boot? (Y/n): " -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            should_enable=true
-        fi
+    if [ ! -r "$stream_src" ]; then
+        print_error "$stream_src not found"
+        echo "  Run this installer from platforms/raspberry-pi/rpi5/"
+        exit 2
     fi
 
-    if [ "$should_enable" = true ]; then
-        sudo systemctl enable rs300-init.service
-        print_success "Systemd service enabled (will run on boot)"
-    else
-        print_status "Service installed but not enabled"
-        echo "  Enable later: sudo systemctl enable rs300-init.service"
-    fi
-    echo ""
-
-    # Install status, test, and stream tools
-    print_status "Installing diagnostic tools..."
-    sudo cp examples/rs300-status /usr/lib/rs300/rs300-status
-    sudo cp examples/rs300-test /usr/lib/rs300/rs300-test
-    sudo cp examples/rs300-stream /usr/lib/rs300/rs300-stream
-    sudo cp examples/rs300-healthcheck /usr/lib/rs300/rs300-healthcheck
-    sudo chmod +x /usr/lib/rs300/rs300-status /usr/lib/rs300/rs300-test /usr/lib/rs300/rs300-stream /usr/lib/rs300/rs300-healthcheck
-    sudo ln -sf /usr/lib/rs300/rs300-status /usr/local/bin/rs300-status
-    sudo ln -sf /usr/lib/rs300/rs300-test /usr/local/bin/rs300-test
-    sudo ln -sf /usr/lib/rs300/rs300-stream /usr/local/bin/rs300-stream
-    sudo ln -sf /usr/lib/rs300/rs300-healthcheck /usr/local/bin/rs300-healthcheck
-    print_success "Tools installed: rs300-status, rs300-test, rs300-stream, rs300-healthcheck"
+    sudo install -D -m 0755 "$stream_src" /usr/local/bin/rs300-stream
+    print_success "Live viewer installed: rs300-stream"
     echo ""
 }
 
@@ -654,13 +626,12 @@ show_next_steps() {
     echo "Next steps:"
     echo ""
     echo -e "  1. ${BLUE}sudo reboot${NC}"
-    echo -e "  2. ${BLUE}rs300-status${NC}        (verify camera detected)"
-    echo -e "  3. ${BLUE}rs300-test${NC}          (live thermal preview)"
-    echo -e "     ${BLUE}rs300-stream${NC}        (GStreamer zero-copy view)"
+    echo -e "  2. ${BLUE}dmesg | grep rs300${NC}        (verify module loaded)"
+    echo -e "  3. ${BLUE}v4l2-ctl --list-devices${NC}   (confirm /dev/video0)"
+    echo -e "  4. ${BLUE}rs300-stream${NC}              (live thermal preview)"
     echo ""
     echo "Configuration:"
     echo "  Module params: /etc/modprobe.d/rs300.conf"
-    echo "  Init script:   /usr/lib/rs300/rs300-init.sh"
     echo "  Uninstall:     sudo dkms remove -m ${DRV_NAME} -v ${DRV_VERSION} --all"
     echo ""
 }
@@ -674,7 +645,7 @@ main() {
     install_dependencies
     install_kernel_module
     install_device_tree
-    install_init_script
+    install_helpers
     show_next_steps
 }
 
