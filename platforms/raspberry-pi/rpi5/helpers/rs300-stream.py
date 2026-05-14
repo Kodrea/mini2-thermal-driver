@@ -49,11 +49,51 @@ def _setup_display_env():
 _setup_display_env()
 os.environ.setdefault('NO_AT_BRIDGE', '1')
 
-import gi  # noqa: E402
-gi.require_version('Gtk', '3.0')
-gi.require_version('Gdk', '3.0')
-gi.require_version('Gst', '1.0')
-from gi.repository import Gdk, GLib, Gst, Gtk  # noqa: E402
+# Dependency-install cheatsheet shipped next to this script in the repo.
+# Note: install.sh copies only this .py to /usr/local/bin, so on a deployed
+# system DEPS_FILE will not exist — the failure handler must still work
+# without it.
+DEPS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         'rs300-stream-deps.txt')
+
+# The apt command, kept in sync with rs300-stream-deps.txt by hand. Duplicated
+# here so the failure message is self-contained when DEPS_FILE is absent.
+DEPS_INSTALL_CMD = (
+    'sudo apt install -y python3-gi python3-gi-cairo gir1.2-gtk-3.0 '
+    'gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 '
+    'gstreamer1.0-plugins-base gstreamer1.0-plugins-good '
+    'gstreamer1.0-plugins-bad gstreamer1.0-gtk3'
+)
+
+
+def _fail_missing_deps(exc):
+    """Print an actionable message and exit when the GTK/GStreamer bindings
+    cannot be imported (python3-gi missing, or the gir1.2-* typelibs not
+    installed). `exc` is the ImportError or ValueError that was raised.
+    """
+    lines = [
+        'ERROR: rs300-stream needs the GTK 3 / GStreamer 1.0 Python bindings,',
+        f'       and they could not be loaded ({type(exc).__name__}: {exc}).',
+        '',
+        'Install them with:',
+        '',
+        f'  {DEPS_INSTALL_CMD}',
+    ]
+    if os.path.exists(DEPS_FILE):
+        lines.append('')
+        lines.append(f'(also listed in {DEPS_FILE})')
+    sys.stderr.write('\n'.join(lines) + '\n')
+    sys.exit(1)
+
+
+try:
+    import gi  # noqa: E402
+    gi.require_version('Gtk', '3.0')
+    gi.require_version('Gdk', '3.0')
+    gi.require_version('Gst', '1.0')
+    from gi.repository import Gdk, GLib, Gst, Gtk  # noqa: E402
+except (ImportError, ValueError) as exc:
+    _fail_missing_deps(exc)
 
 DEV_VIDEO = '/dev/video0'
 SUBDEV = '/dev/v4l-subdev2'

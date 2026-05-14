@@ -2152,6 +2152,67 @@ static int rs300_get_pad_fmt(struct v4l2_subdev *sd,
 	return ret;
 }
 
+/*
+ * Propagate the rs300 source-pad format to the linked CSI-2 receiver sink
+ * pad. The Pi 5 CFE (RP1) does not auto-read the sensor source pad format,
+ * so a stream-on issued through v4l2-ctl or media-ctl fails link validation
+ * ("Wrong width or height ...") whenever the receiver still holds its
+ * power-on default.
+ *
+ * Caller must hold rs300->mutex. Fail-soft: logs and returns on any problem
+ * (including "no downstream pad linked yet") so the same code is safe to
+ * mirror onto platforms whose CSI receivers behave differently.
+ */
+static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&rs300->sd);
+	struct media_pad *remote =
+		media_pad_remote_pad_first(&rs300->pad[IMAGE_PAD]);
+	struct v4l2_subdev_format src_fmt = {
+		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+		.pad = IMAGE_PAD,
+	};
+	struct v4l2_subdev_format remote_fmt = {
+		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+	};
+	struct v4l2_subdev *remote_sd;
+	int ret;
+
+	if (!remote || !is_media_entity_v4l2_subdev(remote->entity)) {
+		dev_dbg(&client->dev,
+			"Format propagation: no downstream subdev linked yet");
+		return;
+	}
+	remote_sd = media_entity_to_v4l2_subdev(remote->entity);
+
+	/*
+	 * Reuse __rs300_get_pad_fmt() so the sink pad receives the same
+	 * output_mode-translated code a get_fmt on the source pad reports.
+	 * Its ACTIVE branch does not dereference sd_state, so NULL is safe.
+	 */
+	ret = __rs300_get_pad_fmt(rs300, NULL, &src_fmt);
+	if (ret) {
+		dev_warn(&client->dev,
+			 "Format propagation: cannot read source format: %d",
+			 ret);
+		return;
+	}
+
+	remote_fmt.pad = remote->index;
+	remote_fmt.format = src_fmt.format;
+
+	ret = v4l2_subdev_call(remote_sd, pad, set_fmt, NULL, &remote_fmt);
+	if (ret && ret != -ENOIOCTLCMD)
+		dev_warn(&client->dev,
+			 "Failed to propagate format to downstream pad: %d",
+			 ret);
+	else
+		dev_info(&client->dev,
+			 "Propagated %dx%d code=0x%x to downstream pad %d",
+			 remote_fmt.format.width, remote_fmt.format.height,
+			 remote_fmt.format.code, remote->index);
+}
+
 // Fix rs300_set_pad_fmt to use v4l2_subdev_get_fmt
 static int rs300_set_pad_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
@@ -2237,6 +2298,9 @@ static int rs300_set_pad_fmt(struct v4l2_subdev *sd,
 			
 			dev_info(&client->dev, "Set ACTIVE format: code=0x%x, %dx%d",
 				rs300->fmt.code, rs300->fmt.width, rs300->fmt.height);
+
+			/* Push the new format down to the CSI-2 receiver. */
+			rs300_propagate_fmt_to_sink(rs300);
 		}
 	} else {
 		dev_err(&client->dev, "Invalid pad %d", fmt->pad);
@@ -3419,6 +3483,19 @@ static int rs300_probe(struct i2c_client *client)
 
 	if (rs300->sd.ctrl_handler)
 		dev_dbg(dev, "Subdevice control handler initialized\n");
+
+	/*
+	 * Push the probe-time format down to the CSI-2 receiver. When this
+	 * driver is loaded after boot (the DKMS case) the rp1-cfe bridge is
+	 * already up, so v4l2_async_register_subdev_sensor() above has
+	 * synchronously matched the sensor and created the media link. A
+	 * later v4l2-ctl / media-ctl stream-on would otherwise fail link
+	 * validation against the receiver's power-on default. Fail-soft if
+	 * the link does not exist yet.
+	 */
+	mutex_lock(&rs300->mutex);
+	rs300_propagate_fmt_to_sink(rs300);
+	mutex_unlock(&rs300->mutex);
 
 	return 0;
 

@@ -34,69 +34,41 @@ sudo ./install.sh --auto 256 25 y   # 256x192 @ 25fps
 
 - **DKMS kernel module** (`rs300.ko`) rebuilt automatically on kernel updates
 - **Device tree overlay** (`rs300.dtbo`) and `config.txt` entry
-- **Init script and systemd service** that re-enables media links after every boot
-- **CLI tools** including `rs300-status`, `rs300-test`, `rs300-stream`, `rs300-healthcheck` in `/usr/local/bin`
+- **`rs300-stream`** live viewer (GTK + GStreamer) in `/usr/local/bin`
 - **Module config** for resolution and FPS stored in `/etc/modprobe.d/rs300.conf`
 
 ## After Reboot
 
-```bash
-rs300-status
-```
-
-Sample output when everything works:
-
-```
-RS300 Thermal Camera Status
-===========================
-
-  Driver:    ok    installed (rs300 0.0.1, kernel 6.12.25+rpt-rpi-2712)
-  Sensor:    ok    /dev/v4l-subdev2 on /dev/media0
-  Init:      ok    active (since 2026-03-16 10:00:00)
-  Config:    ok    /run/rs300/devices (mode: yuyv)
-  Video:     ok    /dev/video0 (YUYV 384/288)
-  Comms:     ok    sensor responding (output_mode=0)
-
-All checks passed.
-```
-
-Comprehensive healthcheck (22 checks):
+Verify the module loaded and the camera enumerated:
 
 ```bash
-rs300-healthcheck
+dmesg | grep rs300              # module probe messages
+v4l2-ctl --list-devices         # expect /dev/video0 plus rs300 subdevs
+v4l2-ctl -d /dev/v4l-subdev2 --get-subdev-fmt pad=0   # sensor resolution
 ```
 
 Live thermal preview:
 
 ```bash
-rs300-test
-```
-
-Press `c` to cycle colormaps, `f` for FFC, `q` to quit.
-
-Zero-copy GStreamer live view:
-
-```bash
 rs300-stream
-rs300-stream --show-fps
-rs300-stream --fps 30
-rs300-stream --resolution 640x512
 ```
 
-### rs300-test Controls
+The viewer auto-detects the sensor resolution (256x192, 384x288, or 640x512) at startup and opens fullscreen. Controls work from the video window or the launching terminal.
+
+### rs300-stream Controls
 
 | Key | Action |
 |-|-|
-| `c` | Cycle colormap |
-| `v` | Cycle scene mode |
-| `f` | Trigger FFC |
-| `a` / `z` | Brightness +10 / -10 |
-| `s` / `x` | Contrast +10 / -10 |
-| `d` / `e` | Spatial NR +10 / -10 |
-| `g` / `b` | Temporal NR +10 / -10 |
-| `h` / `n` | DDE +10 / -10 |
-| `r` | Reset all to defaults |
+| `f` | Trigger FFC (flat-field correction) |
+| `c` | Cycle colormap (0..11) |
+| `m` | Cycle scene mode (0..5) |
+| `a` | Toggle auto shutter |
+| `y` | Toggle output mode (YUV / Y16) |
+| `+` / `-` | Brightness +10 / -10 |
+| `]` / `[` | Contrast +5 / -5 |
+| `}` / `{` | Digital detail enhancement +5 / -5 |
 | `q` / ESC | Quit |
+| `Ctrl+C` | Quit (from launching terminal) |
 
 ## Configuration
 
@@ -121,7 +93,7 @@ grep rs300 /boot/firmware/config.txt
 
 ### Black or frozen image
 
-Some modules freeze on the first frame until FFC is triggered. `rs300-test` does this automatically. To trigger manually:
+Some modules freeze on the first frame until FFC is triggered. `rs300-stream` does this automatically. To trigger manually:
 
 ```bash
 v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl ffc_trigger=1
@@ -130,18 +102,21 @@ sleep 2
 
 ### Device numbers changed after reboot
 
-Video device numbers can change between boots. Stable paths are written to `/run/rs300/devices`:
+Video device numbers can change between boots. List the current nodes and find the rs300 entry:
 
 ```bash
-cat /run/rs300/devices
+v4l2-ctl --list-devices
 ```
 
 ## Uninstall
 
 ```bash
-sudo ./build/uninstall.sh
-sudo reboot
+sudo dkms remove -m rs300 -v 0.0.1 --all
+sudo rm -f /usr/local/bin/rs300-stream
+sudo rm -f /boot/firmware/overlays/rs300.dtbo
 ```
+
+Then remove the `dtoverlay=rs300` line from `/boot/firmware/config.txt` and reboot.
 
 ## Files
 
@@ -152,3 +127,4 @@ sudo reboot
 | `src/rs300-overlay.dts` | Device tree overlay |
 | `Makefile` | DKMS build |
 | `dkms.conf` | DKMS config |
+| `helpers/rs300-stream.py` | Live viewer (GTK + GStreamer) |
