@@ -610,6 +610,18 @@ install_helpers() {
 
     sudo install -D -m 0755 "$stream_src" /usr/local/bin/rs300-stream
     print_success "Live viewer installed: rs300-stream"
+
+    local rules_src="src/99-rs300.rules"
+    local rules_dst="/etc/udev/rules.d/99-rs300.rules"
+
+    if [ ! -r "$rules_src" ]; then
+        print_error "$rules_src not found"
+        exit 2
+    fi
+
+    sudo install -D -m 0644 "$rules_src" "$rules_dst"
+    sudo udevadm control --reload-rules
+    print_success "Sensor subdev udev rule installed: $rules_dst"
     echo ""
 }
 
