@@ -266,9 +266,6 @@ struct rs300 {
 	/* Streaming on/off */
 	bool streaming;
 
-	/* Deferred YUV format configuration (set on first stream start) */
-	bool yuv_format_configured;
-
 	/* Boot-time format propagation to the CSI-2 receiver */
 	struct delayed_work propagate_work;
 	int propagate_retries;
@@ -1018,7 +1015,7 @@ static int rs300_set_output_mode(struct rs300 *rs300, int value)
     return -ETIMEDOUT;
 }
 
-static int rs300_set_yuv_format(struct rs300 *rs300, int format)
+static int __maybe_unused rs300_set_yuv_format(struct rs300 *rs300, int format)
 {
     struct i2c_client *client = v4l2_get_subdevdata(&rs300->sd);
     u8 cmd_buffer[18];
@@ -2538,15 +2535,6 @@ static int rs300_set_stream(struct v4l2_subdev *sd, int enable)
             0x00, 0x00
         };
 
-        /* Deferred YUV format config: set on first stream start when sensor is ready */
-        if (!rs300->yuv_format_configured) {
-            ret = rs300_set_yuv_format(rs300, 2); /* YUYV format */
-            if (ret)
-                dev_warn(&client->dev, "YUV format set failed: %d (continuing)", ret);
-            else
-                rs300->yuv_format_configured = true;
-        }
-
         // Set FPS first
         ret = rs300_set_fps(rs300, fps);
         if (ret) {
@@ -3510,13 +3498,6 @@ static int rs300_probe(struct i2c_client *client)
 
 	/* Initialize default format */
 	rs300_set_default_format(rs300);
-
-	/*
-	 * YUV format configuration deferred to first stream start.
-	 * The sensor is not ready for I2C commands during probe,
-	 * causing -121 (EREMOTEIO) errors on register 0x1d00.
-	 */
-	rs300->yuv_format_configured = false;
 
 	/* Initialize mutex */
 	mutex_init(&rs300->mutex);
