@@ -272,6 +272,7 @@ struct rs300 {
 	/* Boot-time format propagation to the CSI-2 receiver */
 	struct delayed_work propagate_work;
 	int propagate_retries;
+	bool propagate_logged;
 };
 
 /* Autoshutter function prototypes (after struct rs300 definition) */
@@ -2165,10 +2166,11 @@ static int rs300_get_pad_fmt(struct v4l2_subdev *sd,
  * power-on default.
  *
  * May be called with or without rs300->mutex held. Fail-soft: logs and
- * returns on any problem (including "no downstream pad linked yet") so the
- * same code is safe to call from the propagate work or set_pad_fmt.
+ * returns an errno on any problem (including "no downstream pad linked
+ * yet") so the same code is safe to call from the propagate work or
+ * set_pad_fmt. Returns 0 only when the receiver accepted the format.
  */
-static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
+static int rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&rs300->sd);
 	struct media_pad *remote =
@@ -2187,7 +2189,7 @@ static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 	if (!remote || !is_media_entity_v4l2_subdev(remote->entity)) {
 		dev_dbg(&client->dev,
 			"Format propagation: no downstream subdev linked yet");
-		return;
+		return -ENODEV;
 	}
 	remote_sd = media_entity_to_v4l2_subdev(remote->entity);
 
@@ -2201,7 +2203,7 @@ static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 		dev_warn(&client->dev,
 			 "Format propagation: cannot read source format: %d",
 			 ret);
-		return;
+		return ret;
 	}
 
 	remote_fmt.pad = remote->index;
@@ -2210,23 +2212,37 @@ static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 	/*
 	 * Set the receiver's sink pad through its locked active state -- the
 	 * same path VIDIOC_SUBDEV_S_FMT takes. A NULL state does not persist
-	 * on the rp1-cfe csi2 subdev under kernel 6.12: set_fmt returns 0 but
-	 * the format is silently dropped.
+	 * on the rp1-cfe csi2 subdev under kernel 6.12.
+	 *
+	 * -ENOIOCTLCMD here means the receiver has no set_fmt yet, i.e. it is
+	 * not ready -- treat it as a failure so the caller retries, rather
+	 * than reporting a success that never reached the hardware.
 	 */
 	remote_state = v4l2_subdev_lock_and_get_active_state(remote_sd);
 	ret = v4l2_subdev_call(remote_sd, pad, set_fmt, remote_state, &remote_fmt);
 	if (remote_state)
 		v4l2_subdev_unlock_state(remote_state);
 
-	if (ret && ret != -ENOIOCTLCMD)
+	if (ret) {
 		dev_warn(&client->dev,
 			 "Failed to propagate format to downstream pad: %d",
 			 ret);
-	else
+		return ret;
+	}
+
+	if (!rs300->propagate_logged) {
 		dev_info(&client->dev,
 			 "Propagated %dx%d code=0x%x to downstream pad %d",
 			 remote_fmt.format.width, remote_fmt.format.height,
 			 remote_fmt.format.code, remote->index);
+		rs300->propagate_logged = true;
+	} else {
+		dev_dbg(&client->dev,
+			"Re-propagated %dx%d to downstream pad %d",
+			remote_fmt.format.width, remote_fmt.format.height,
+			remote->index);
+	}
+	return 0;
 }
 
 /*
@@ -2240,12 +2256,14 @@ static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
  * with a media device: entity->links is only INIT_LIST_HEAD'd inside
  * media_device_register_entity(), and graph_obj.mdev is set at the same point.
  *
- * This delayed work polls for both conditions, then propagates once. It lets
- * a plain "v4l2-ctl --stream-mmap" with no prior media-ctl setup still pass
- * the receiver's link validation.
+ * A single propagation does not hold: the receiver is not ready when the
+ * link first appears, and rp1-cfe re-defaults the csi2 pad formats during
+ * its own late init. So this work re-propagates on a fixed interval across
+ * the early-boot window, which lets a plain "v4l2-ctl --stream-mmap" with no
+ * prior media-ctl setup pass the receiver's link validation.
  */
-#define RS300_PROPAGATE_MAX_RETRIES	25
-#define RS300_PROPAGATE_INTERVAL_MS	200
+#define RS300_PROPAGATE_MAX_RETRIES	80
+#define RS300_PROPAGATE_INTERVAL_MS	500
 
 static void rs300_propagate_work(struct work_struct *work)
 {
@@ -2257,7 +2275,6 @@ static void rs300_propagate_work(struct work_struct *work)
 		mutex_lock(&rs300->mutex);
 		rs300_propagate_fmt_to_sink(rs300);
 		mutex_unlock(&rs300->mutex);
-		return;
 	}
 
 	if (rs300->propagate_retries++ < RS300_PROPAGATE_MAX_RETRIES)
