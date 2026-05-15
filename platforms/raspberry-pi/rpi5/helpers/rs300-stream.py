@@ -167,10 +167,14 @@ WIDTH, HEIGHT = _detect_resolution()
 
 def _propagate_csi_format(width, height):
     """Force the Pi 5 CFE CSI-2 receiver pads (/dev/v4l-subdev0) to match the
-    rs300 source resolution. The rs300 driver does not push format changes
-    through the link, so without this the CFE sees the previous default
-    (typically 384x288) on its sink pads and rejects stream-on with
-    'Wrong width or height ...'. Workaround until the driver propagates."""
+    rs300 source resolution.
+
+    The rs300 driver now propagates the sensor format to the CSI-2 receiver
+    from a deferred-work hook at boot, so this call is normally redundant.
+    It is kept as a defensive fallback so the script also works with older
+    driver builds and any setup where the driver's boot-time window did not
+    land the format. The set_fmt calls are idempotent, so re-applying the
+    current format here is harmless."""
     csi_dev = '/dev/v4l-subdev0'
     if not os.path.exists(csi_dev):
         return

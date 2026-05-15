@@ -2279,7 +2279,6 @@ static void rs300_propagate_work(struct work_struct *work)
 			msecs_to_jiffies(RS300_PROPAGATE_INTERVAL_MS));
 }
 
-// Fix rs300_set_pad_fmt to use v4l2_subdev_get_fmt
 static int rs300_set_pad_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *fmt)
