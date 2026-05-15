@@ -20,6 +20,7 @@
 #include <linux/uaccess.h>
 #include <linux/videodev2.h>
 #include <linux/version.h>
+#include <linux/workqueue.h>
 #include <media/media-entity.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
@@ -267,6 +268,10 @@ struct rs300 {
 
 	/* Deferred YUV format configuration (set on first stream start) */
 	bool yuv_format_configured;
+
+	/* Boot-time format propagation to the CSI-2 receiver */
+	struct delayed_work propagate_work;
+	int propagate_retries;
 };
 
 /* Autoshutter function prototypes (after struct rs300 definition) */
@@ -2159,9 +2164,9 @@ static int rs300_get_pad_fmt(struct v4l2_subdev *sd,
  * ("Wrong width or height ...") whenever the receiver still holds its
  * power-on default.
  *
- * Caller must hold rs300->mutex. Fail-soft: logs and returns on any problem
- * (including "no downstream pad linked yet") so the same code is safe to
- * mirror onto platforms whose CSI receivers behave differently.
+ * May be called with or without rs300->mutex held. Fail-soft: logs and
+ * returns on any problem (including "no downstream pad linked yet") so the
+ * same code is safe to call from the propagate work or set_pad_fmt.
  */
 static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 {
@@ -2175,6 +2180,7 @@ static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 	struct v4l2_subdev_format remote_fmt = {
 		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
 	};
+	struct v4l2_subdev_state *remote_state;
 	struct v4l2_subdev *remote_sd;
 	int ret;
 
@@ -2201,7 +2207,17 @@ static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 	remote_fmt.pad = remote->index;
 	remote_fmt.format = src_fmt.format;
 
-	ret = v4l2_subdev_call(remote_sd, pad, set_fmt, NULL, &remote_fmt);
+	/*
+	 * Set the receiver's sink pad through its locked active state -- the
+	 * same path VIDIOC_SUBDEV_S_FMT takes. A NULL state does not persist
+	 * on the rp1-cfe csi2 subdev under kernel 6.12: set_fmt returns 0 but
+	 * the format is silently dropped.
+	 */
+	remote_state = v4l2_subdev_lock_and_get_active_state(remote_sd);
+	ret = v4l2_subdev_call(remote_sd, pad, set_fmt, remote_state, &remote_fmt);
+	if (remote_state)
+		v4l2_subdev_unlock_state(remote_state);
+
 	if (ret && ret != -ENOIOCTLCMD)
 		dev_warn(&client->dev,
 			 "Failed to propagate format to downstream pad: %d",
@@ -2211,6 +2227,42 @@ static void rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 			 "Propagated %dx%d code=0x%x to downstream pad %d",
 			 remote_fmt.format.width, remote_fmt.format.height,
 			 remote_fmt.format.code, remote->index);
+}
+
+/*
+ * Boot-time format propagation to the CSI-2 receiver.
+ *
+ * The rp1-cfe bridge links the sensor to its receiver from an async-notifier
+ * callback that runs after rs300_probe() returns, and it creates that link
+ * ENABLED|IMMUTABLE -- so the link_setup entity op is never invoked for it
+ * (the kernel only calls link_setup on the mutable state-change path).
+ * media_pad_remote_pad_first() is also unsafe until the entity is registered
+ * with a media device: entity->links is only INIT_LIST_HEAD'd inside
+ * media_device_register_entity(), and graph_obj.mdev is set at the same point.
+ *
+ * This delayed work polls for both conditions, then propagates once. It lets
+ * a plain "v4l2-ctl --stream-mmap" with no prior media-ctl setup still pass
+ * the receiver's link validation.
+ */
+#define RS300_PROPAGATE_MAX_RETRIES	25
+#define RS300_PROPAGATE_INTERVAL_MS	200
+
+static void rs300_propagate_work(struct work_struct *work)
+{
+	struct rs300 *rs300 = container_of(to_delayed_work(work),
+					   struct rs300, propagate_work);
+
+	if (rs300->sd.entity.graph_obj.mdev &&
+	    media_pad_remote_pad_first(&rs300->pad[IMAGE_PAD])) {
+		mutex_lock(&rs300->mutex);
+		rs300_propagate_fmt_to_sink(rs300);
+		mutex_unlock(&rs300->mutex);
+		return;
+	}
+
+	if (rs300->propagate_retries++ < RS300_PROPAGATE_MAX_RETRIES)
+		schedule_delayed_work(&rs300->propagate_work,
+			msecs_to_jiffies(RS300_PROPAGATE_INTERVAL_MS));
 }
 
 // Fix rs300_set_pad_fmt to use v4l2_subdev_get_fmt
@@ -3485,17 +3537,13 @@ static int rs300_probe(struct i2c_client *client)
 		dev_dbg(dev, "Subdevice control handler initialized\n");
 
 	/*
-	 * Push the probe-time format down to the CSI-2 receiver. When this
-	 * driver is loaded after boot (the DKMS case) the rp1-cfe bridge is
-	 * already up, so v4l2_async_register_subdev_sensor() above has
-	 * synchronously matched the sensor and created the media link. A
-	 * later v4l2-ctl / media-ctl stream-on would otherwise fail link
-	 * validation against the receiver's power-on default. Fail-soft if
-	 * the link does not exist yet.
+	 * Kick off boot-time format propagation. The rp1-cfe link does not
+	 * exist yet; rs300_propagate_work() polls for it and fail-softs if it
+	 * never appears (e.g. no bridge bound).
 	 */
-	mutex_lock(&rs300->mutex);
-	rs300_propagate_fmt_to_sink(rs300);
-	mutex_unlock(&rs300->mutex);
+	INIT_DELAYED_WORK(&rs300->propagate_work, rs300_propagate_work);
+	schedule_delayed_work(&rs300->propagate_work,
+			      msecs_to_jiffies(RS300_PROPAGATE_INTERVAL_MS));
 
 	return 0;
 
@@ -3516,6 +3564,7 @@ static void rs300_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct rs300 *rs300 = to_rs300(sd);
 
+	cancel_delayed_work_sync(&rs300->propagate_work);
 	v4l2_async_unregister_subdev(sd);
 	media_entity_cleanup(&sd->entity);
 	rs300_free_controls(rs300);
