@@ -14,12 +14,13 @@ Any commit that touches `src/rs300.c` in any platform triggers a sync check acro
 
 ```bash
 # Diff a platform against rock5bp (the reference)
-diff platforms/rock5bp/src/rs300.c platforms/rpi5/src/rs300.c
+diff platforms/radxa/rock5bp/src/rs300.c platforms/raspberry-pi/rpi5/src/rs300.c
 
-# Check all platforms at once
-for p in rpi4b rpi5 zero3w zero2w; do
-    echo "=== $p ==="
-    diff platforms/rock5bp/src/rs300.c platforms/$p/src/rs300.c | head -20
+# Check every platform against the reference at once
+REF=platforms/radxa/rock5bp/src/rs300.c
+for f in $(find platforms -name rs300.c | grep -v "^$REF$"); do
+    echo "=== $f ==="
+    diff "$REF" "$f" | head -20
 done
 ```
 
