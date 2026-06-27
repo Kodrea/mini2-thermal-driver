@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+/ {
+	fragment@0 {
+		target-path = "/bus@0/cam_i2cmux/i2c@1";
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			rs300_cam1: rs300@3c {
+				status = "okay";
+				compatible = "mini2,rs300", "infisense,rs300";
+				reg = <0x3c>;
+				devnode = "video1";
+				physical_w = "3.680";
+				physical_h = "2.760";
+				sensor_model = "rs300";
+				use_sensor_mode_id = "true";
+					/*
+					 * Auvidea JNX CAM1_PW_DN / PAC.00.
+					 * libgpiod shows this as gpiochip0 line 138, but the
+					 * Tegra234 DT binding uses TEGRA234_MAIN_GPIO(AC, 0):
+					 * (20 * 8) + 0 = 160. Keep the raw binding value so this
+					 * overlay builds with plain dtc.
+					 */
+					power-gpios = <&gpio 160 0>;
+
+				mode0 {
+					mclk_khz = "24000";
+					num_lanes = "2";
+					tegra_sinterface = "serial_c";
+					phy_mode = "DPHY";
+					discontinuous_clk = "yes";
+					dpcm_enable = "false";
+					cil_settletime = "0";
+					active_w = "640";
+					active_h = "512";
+					mode_type = "yuv";
+					pixel_t = "yuv_uyvy16";
+					pixel_phase = "uyvy";
+					csi_pixel_bit_depth = "8";
+					readout_orientation = "0";
+					line_length = "640";
+					inherent_gain = "1";
+					mclk_multiplier = "1";
+					pix_clk_hz = "40000000";
+					gain_factor = "1";
+					framerate_factor = "1000000";
+					exposure_factor = "1000000";
+					min_gain_val = "1";
+					max_gain_val = "1";
+					step_gain_val = "1";
+					default_gain = "1";
+					min_hdr_ratio = "1";
+					max_hdr_ratio = "1";
+					min_framerate = "60000000";
+					max_framerate = "60000000";
+					step_framerate = "1";
+					default_framerate = "60000000";
+					min_exp_time = "1";
+					max_exp_time = "16666";
+					step_exp_time = "1";
+					default_exp_time = "16666";
+					embedded_metadata_height = "0";
+				};
+
+				ports {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					port@0 {
+						reg = <0>;
+
+						rs300_cam1_out: endpoint {
+							status = "okay";
+							port-index = <2>;
+							bus-width = <2>;
+							bus-type = <4>;
+							data-lanes = <1 2>;
+							link-frequencies = /bits/ 64 <80000000>;
+							clock-noncontinuous;
+							remote-endpoint = <&rbpcv2_imx219_csi_in1>;
+						};
+					};
+				};
+			};
+		};
+	};
+
+	fragment@1 {
+		target = <&rbpcv2_imx219_csi_in1>;
+		__overlay__ {
+			port-index = <2>;
+			bus-width = <2>;
+			remote-endpoint = <&rs300_cam1_out>;
+		};
+	};
+
+	fragment@2 {
+		target = <&cam_module1>;
+		__overlay__ {
+			status = "okay";
+			badge = "rs300_cam1";
+			position = "rear";
+			orientation = "1";
+
+			drivernode0 {
+				pcl_id = "v4l2_sensor";
+				sysfs-device-tree = "/sys/firmware/devicetree/base/bus@0/cam_i2cmux/i2c@1/rs300@3c";
+			};
+
+			drivernode1 {
+				status = "disabled";
+			};
+		};
+	};
+
+	fragment@3 {
+		target = <&tcp>;
+		__overlay__ {
+			min_bits_per_pixel = <8>;
+			max_pixel_rate = <40000000>;
+			vi_peak_byte_per_pixel = <2>;
+		};
+	};
+};

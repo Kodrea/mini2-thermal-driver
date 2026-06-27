@@ -35,8 +35,12 @@ Known intentional divergences:
 | `rs300_g_frame_interval` | rock5bp, zero3w | Rockchip BSP callback |
 | `RKMODULE_*` DT property reads in probe | rock5bp, zero3w | Rockchip BSP requirement |
 | `MEDIA_BUS_FMT_YUYV8_2X8` in `supported_modes`, `get_fmt`, and `pixel_rate` init | zero2w, rpi4b | `bcm2835-unicam-legacy` (BCM2710 / BCM2711 / BCM2837) does not accept Y16 passthrough; rpi5 uses `unicam_csi2` which does |
+| Tegra `tegracam` integration, `power-gpios`, and WN2640-like START defaults | nvidia/orin-nx | NVIDIA camera stack requires `camera_common`/`tegracam` glue and the tested CAM1 module uses `path=1,dst=1,set_fps_cmd=0` |
 
 Rockchip platforms (rock5bp, zero3w) also share the same install path: DKMS + overlay + `initcall_blacklist=rkcif_clr_unready_dev`.
+
+NVIDIA Jetson platforms use out-of-tree kernel module installation plus extlinux
+DTBO boot integration instead of DKMS.
 
 When propagating a fix, skip these blocks on non-Rockchip platforms.
 
