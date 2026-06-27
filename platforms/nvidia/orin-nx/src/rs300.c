@@ -44,7 +44,11 @@
 #define RS300_LINK_RATE (80 * 1000 * 1000)       /* 80MHz link rate matching device tree */
 #define RS300_PIXEL_RATE	(40 * 1000 * 1000)   /* 80 MHz D-PHY clock, 2 lanes, 8-bit bus */
 #define RS300_PIXEL_RATE_16BIT	(20 * 1000 * 1000)
-#define RS300_DEFAULT_MBUS_CODE MEDIA_BUS_FMT_UYVY8_2X8
+#define RS300_UYVY_MBUS_CODE MEDIA_BUS_FMT_UYVY8_2X8
+#define RS300_DEFAULT_MBUS_CODE RS300_UYVY_MBUS_CODE
+#define RS300_OUTPUT_MODE_YUV 0
+#define RS300_OUTPUT_MODE_Y16 1
+#define RS300_OUTPUT_MODE_DEFAULT RS300_OUTPUT_MODE_Y16
 #define RS300_BRIGHTNESS_MIN 0
 #define RS300_BRIGHTNESS_MAX 100
 #define RS300_BRIGHTNESS_STEP 10
@@ -127,8 +131,9 @@ static int prestart_prime_cycles = 0;
 static int prestart_prime_ms = 1000;
 static int prestart_prime_stop_ms = 300;
 static int power_on_delay_ms = 8000;
-static int auto_shutter = 1;
+static int auto_shutter = 0;
 static int startup_ffc = 0;
+static int native_y16 = 0;
 module_param(mode, int, 0644);
 module_param(fps, int, 0644);
 module_param(set_fps_cmd, int, 0644);
@@ -150,6 +155,7 @@ module_param(prestart_prime_stop_ms, int, 0644);
 module_param(power_on_delay_ms, int, 0644);
 module_param(auto_shutter, int, 0644);
 module_param(startup_ffc, int, 0644);
+module_param(native_y16, int, 0644);
 MODULE_PARM_DESC(mode, "Sensor mode index: 0=640x512, 1=256x192, 2=384x288");
 MODULE_PARM_DESC(fps, "Frame rate sent to the RS300 start packet");
 MODULE_PARM_DESC(set_fps_cmd, "Send the separate RS300 FPS command before START");
@@ -171,6 +177,7 @@ MODULE_PARM_DESC(prestart_prime_stop_ms, "Delay after each prestart prime STOP c
 MODULE_PARM_DESC(power_on_delay_ms, "Delay after asserting power GPIO/regulators before I2C/CSI use");
 MODULE_PARM_DESC(auto_shutter, "Initial auto-shutter state: -1=leave camera default, 0=off, 1=on");
 MODULE_PARM_DESC(startup_ffc, "Attempt one manual FFC/shutter calibration before the first stream start");
+MODULE_PARM_DESC(native_y16, "Experimental: request V4L2_PIX_FMT_Y16 for output_mode=1 over the stable UYVY CSI transport; 0 keeps UYVY fallback");
 
 /*
  * rs300 register definitions
@@ -285,6 +292,22 @@ static const u32 codes[] = {
 	RS300_DEFAULT_MBUS_CODE,
 };
 
+/*
+ * The WN2640-like module can put 16-bit thermal samples into the same 2-byte
+ * CSI transport that Tegra already captures reliably as UYVY. Jetson's camera
+ * format table does not expose a native mono16 CSI pixel_t for this path, so
+ * native_y16 re-labels the V4L2 video node as Y16 while keeping the proven
+ * UYVY media bus code and packet timing.
+ */
+static const struct camera_common_colorfmt rs300_native_y16_colorfmt = {
+	.code = RS300_UYVY_MBUS_CODE,
+	.colorspace = V4L2_COLORSPACE_RAW,
+	.pix_fmt = V4L2_PIX_FMT_Y16,
+	.xfer_func = V4L2_XFER_FUNC_NONE,
+	.ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT,
+	.quantization = V4L2_QUANTIZATION_FULL_RANGE,
+};
+
 struct rs300 {
 	struct i2c_client *client;
 	struct v4l2_subdev sd;
@@ -305,6 +328,7 @@ struct rs300 {
 	bool power_enabled;
 	bool startup_ffc_done;
 	bool auto_shutter_initialized;
+	bool stream_defaults_initialized;
 
 	struct v4l2_ctrl_handler ctrl_handler;
 	/* V4L2 Controls */
@@ -374,6 +398,8 @@ static int rs300_set_autoshutter_params(struct rs300 *rs300, int param_type, int
 static int rs300_set_output_mode(struct rs300 *rs300, int value);
 static int rs300_set_yuv_format(struct rs300 *rs300, int format);
 static int rs300_set_fps(struct rs300 *rs300, int fps);
+static int rs300_power_on_state(struct rs300 *rs300);
+static int rs300_force_tegracam_bus_code(struct rs300 *rs300);
 
 struct rs300_command {
     u8 class;
@@ -747,6 +773,22 @@ static inline struct rs300 *to_rs300(struct v4l2_subdev *sd)
 	return container_of(sd, struct rs300, sd);
 }
 
+static int rs300_current_output_mode(struct rs300 *rs300)
+{
+	if (output_source >= 0)
+		return output_source;
+
+	if (rs300 && rs300->output_mode)
+		return rs300->output_mode->val;
+
+	return RS300_OUTPUT_MODE_DEFAULT;
+}
+
+static bool rs300_should_expose_native_y16(struct rs300 *rs300)
+{
+	return native_y16 && rs300_current_output_mode(rs300) == RS300_OUTPUT_MODE_Y16;
+}
+
 static u32 rs300_get_format_code(struct rs300 *rs300, u32 code)
 {
 	unsigned int i;
@@ -1011,7 +1053,7 @@ static int rs300_set_output_mode(struct rs300 *rs300, int value)
 
     dev_dbg(&client->dev, "Setting output mode to %d", value);
 
-    if (value < 0 || value > 1) {
+    if (value < RS300_OUTPUT_MODE_YUV || value > RS300_OUTPUT_MODE_Y16) {
         dev_err(&client->dev, "Invalid output mode value: %d (valid: 0=YUV, 1=Y16)", value);
         return -EINVAL;
     }
@@ -1493,6 +1535,14 @@ static int rs300_get_ctrl(struct v4l2_ctrl *ctrl)
     int value = 0;
     int ret;
 
+    if (!rs300->power_enabled) {
+        ret = rs300_power_on_state(rs300);
+        if (ret)
+            return ret;
+        if (rs300->s_data && rs300->s_data->power)
+            rs300->s_data->power->state = SWITCH_ON;
+    }
+
     switch (ctrl->id) {
     case RS300_CID_BRIGHTNESS:
         ret = rs300_get_brightness(rs300, &value);
@@ -1522,6 +1572,37 @@ static int rs300_get_ctrl(struct v4l2_ctrl *ctrl)
     return 0;
 }
 
+static bool rs300_ctrl_uses_i2c(u32 id)
+{
+    switch (id) {
+    case V4L2_CID_TEST_PATTERN:
+    case RS300_CID_BRIGHTNESS:
+    case V4L2_CID_CUSTOM_BASE + 1:
+    case V4L2_CID_CUSTOM_BASE + 2:
+    case V4L2_CID_ZOOM_ABSOLUTE:
+    case V4L2_CID_CUSTOM_BASE + 3:
+    case RS300_CID_CONTRAST:
+    case V4L2_CID_CUSTOM_BASE + 4:
+    case V4L2_CID_CUSTOM_BASE + 5:
+    case V4L2_CID_CUSTOM_BASE + 6:
+    case V4L2_CID_CUSTOM_BASE + 7:
+    case V4L2_CID_CUSTOM_BASE + 8:
+    case V4L2_CID_CUSTOM_BASE + 9:
+    case V4L2_CID_CUSTOM_BASE + 10:
+    case V4L2_CID_CUSTOM_BASE + 11:
+    case V4L2_CID_CUSTOM_BASE + 12:
+    case V4L2_CID_CUSTOM_BASE + 13:
+    case V4L2_CID_CUSTOM_BASE + 14:
+    case V4L2_CID_CUSTOM_BASE + 15:
+    case V4L2_CID_CUSTOM_BASE + 16:
+    case V4L2_CID_CUSTOM_BASE + 17:
+    case V4L2_CID_CUSTOM_BASE + 18:
+        return true;
+    default:
+        return false;
+    }
+}
+
 static int rs300_set_ctrl(struct v4l2_ctrl *ctrl)
 {
     struct rs300 *rs300 =
@@ -1532,6 +1613,14 @@ static int rs300_set_ctrl(struct v4l2_ctrl *ctrl)
     /* Add debug info */
     dev_dbg(&client->dev, "Setting control ID 0x%x to value %d\n",
             ctrl->id, ctrl->val);
+
+    if (rs300_ctrl_uses_i2c(ctrl->id) && !rs300->power_enabled) {
+        ret = rs300_power_on_state(rs300);
+        if (ret)
+            return ret;
+        if (rs300->s_data && rs300->s_data->power)
+            rs300->s_data->power->state = SWITCH_ON;
+    }
 
     switch (ctrl->id) {
     case V4L2_CID_TEST_PATTERN:
@@ -1572,6 +1661,8 @@ static int rs300_set_ctrl(struct v4l2_ctrl *ctrl)
         break;
     case V4L2_CID_CUSTOM_BASE + 7:  /* Output Mode */
         ret = rs300_set_output_mode(rs300, ctrl->val);
+        if (!ret)
+            rs300_force_tegracam_bus_code(rs300);
         break;
     case V4L2_CID_CUSTOM_BASE + 8:  /* Autoshutter enable/disable */
         ret = rs300_set_autoshutter(rs300, ctrl->val);
@@ -2044,13 +2135,11 @@ static int rs300_prime_i2c_only(struct rs300 *rs300)
              "RS300 probe prime: start for %d ms, packet=%ux%u",
              probe_prime_ms, packet_width, packet_height);
 
-    if (output_source >= 0) {
-        ret = rs300_set_output_mode(rs300, output_source);
-        if (ret)
-            dev_warn(&client->dev,
-                     "Probe prime output source %d failed: %d (continuing)",
-                     output_source, ret);
-    }
+    ret = rs300_set_output_mode(rs300, rs300_current_output_mode(rs300));
+    if (ret)
+        dev_warn(&client->dev,
+                 "Probe prime output mode %d failed: %d (continuing)",
+                 rs300_current_output_mode(rs300), ret);
 
     if (yuv_order >= 0) {
         ret = rs300_set_yuv_format(rs300, yuv_order);
@@ -2213,11 +2302,13 @@ static int rs300_set_stream_state(struct rs300 *rs300, int enable)
                  output_source, yuv_order, start_path, type, start_dst, fps,
                  packet_width, packet_height);
 
-        if (output_source >= 0) {
-            ret = rs300_set_output_mode(rs300, output_source);
+        {
+            int output_mode_value = rs300_current_output_mode(rs300);
+
+            ret = rs300_set_output_mode(rs300, output_mode_value);
             if (ret)
-                dev_warn(&client->dev, "Output source %d set failed: %d (continuing)",
-                         output_source, ret);
+                dev_warn(&client->dev, "Output mode %d set failed: %d (continuing)",
+                         output_mode_value, ret);
         }
 
         if (yuv_order >= 0) {
@@ -2227,6 +2318,41 @@ static int rs300_set_stream_state(struct rs300 *rs300, int enable)
                          yuv_order, ret);
             else
                 rs300->yuv_format_configured = true;
+        }
+
+        if (!rs300->stream_defaults_initialized) {
+            if (rs300->dde) {
+                ret = rs300_set_dde(rs300, rs300->dde->val);
+                if (ret)
+                    dev_warn(&client->dev, "DDE default %d set failed: %d (continuing)",
+                             rs300->dde->val, ret);
+            }
+
+            if (rs300->spatial_nr) {
+                ret = rs300_set_spatial_nr(rs300, rs300->spatial_nr->val);
+                if (ret)
+                    dev_warn(&client->dev,
+                             "Spatial NR default %d set failed: %d (continuing)",
+                             rs300->spatial_nr->val, ret);
+            }
+
+            if (rs300->temporal_nr) {
+                ret = rs300_set_temporal_nr(rs300, rs300->temporal_nr->val);
+                if (ret)
+                    dev_warn(&client->dev,
+                             "Temporal NR default %d set failed: %d (continuing)",
+                             rs300->temporal_nr->val, ret);
+            }
+
+            if (rs300->frame_rate) {
+                ret = rs300_set_frame_rate(rs300, rs300->frame_rate->val);
+                if (ret)
+                    dev_warn(&client->dev,
+                             "Detector frame-rate default %d set failed: %d (continuing)",
+                             rs300->frame_rate->val, ret);
+            }
+
+            rs300->stream_defaults_initialized = true;
         }
 
         if (set_fps_cmd) {
@@ -2257,7 +2383,10 @@ static int rs300_set_stream_state(struct rs300 *rs300, int enable)
                          "Invalid auto_shutter=%d; expected -1, 0 or 1",
                          auto_shutter);
             } else {
-                ret = rs300_set_autoshutter(rs300, auto_shutter);
+                int auto_shutter_value = rs300->autoshutter ?
+                    rs300->autoshutter->val : auto_shutter;
+
+                ret = rs300_set_autoshutter(rs300, auto_shutter_value);
                 if (ret)
                     dev_warn(&client->dev,
                              "Auto-shutter setup failed: %d (continuing)",
@@ -2492,6 +2621,9 @@ static int rs300_power_off_state(struct rs300 *rs300)
 	}
 
 	rs300->power_enabled = false;
+	rs300->auto_shutter_initialized = false;
+	rs300->stream_defaults_initialized = false;
+	rs300->yuv_format_configured = false;
 
 	return 0;
 }
@@ -2657,8 +2789,8 @@ static const struct v4l2_ctrl_config contrast_ctrl = {
     .id = RS300_CID_CONTRAST,
     .name = "Contrast",
     .type = V4L2_CTRL_TYPE_INTEGER,
-    .min = 50,
-    .max = 50,
+    .min = 0,
+    .max = 100,
     .step = 1,
     .def = 50,
 };
@@ -2690,10 +2822,10 @@ static const struct v4l2_ctrl_config dde_ctrl = {
     .id = V4L2_CID_CUSTOM_BASE + 4,
     .name = "Digital Detail Enhancement",
     .type = V4L2_CTRL_TYPE_INTEGER,
-    .min = 50,
-    .max = 50,
+    .min = 0,
+    .max = 100,
     .step = 1,
-    .def = 50,
+    .def = 0,
 };
 
 static const struct v4l2_ctrl_config spatial_nr_ctrl = {
@@ -2701,10 +2833,10 @@ static const struct v4l2_ctrl_config spatial_nr_ctrl = {
     .id = V4L2_CID_CUSTOM_BASE + 5,
     .name = "Spatial Noise Reduction",
     .type = V4L2_CTRL_TYPE_INTEGER,
-    .min = 50,
-    .max = 50,
+    .min = 0,
+    .max = 100,
     .step = 1,
-    .def = 50,
+    .def = 0,
 };
 
 static const struct v4l2_ctrl_config temporal_nr_ctrl = {
@@ -2712,10 +2844,10 @@ static const struct v4l2_ctrl_config temporal_nr_ctrl = {
     .id = V4L2_CID_CUSTOM_BASE + 6,
     .name = "Temporal Noise Reduction",
     .type = V4L2_CTRL_TYPE_INTEGER,
-    .min = 50,
-    .max = 50,
+    .min = 0,
+    .max = 100,
     .step = 1,
-    .def = 50,
+    .def = 0,
 };
 
 static const struct v4l2_ctrl_config autoshutter_ctrl = {
@@ -2726,7 +2858,7 @@ static const struct v4l2_ctrl_config autoshutter_ctrl = {
     .min = 0,
     .max = 1,
     .step = 1,  /* BOOLEAN needs step=1 (unlike BUTTON which uses step=0) */
-    .def = 1,  /* Periodic FFC enabled by default for thermal stability */
+    .def = 0,
 };
 
 static const struct v4l2_ctrl_config autoshutter_temp_ctrl = {
@@ -2876,7 +3008,7 @@ static const struct v4l2_ctrl_config output_mode_ctrl = {
     .qmenu = output_mode_menu,
     .min = 0,
     .max = 1,
-    .def = 0,  /* Default to YUV (bypass). Set to 1 for Y16 (ISP). */
+    .def = RS300_OUTPUT_MODE_DEFAULT,
 };
 
 static const struct v4l2_ctrl_config tegra_sensor_mode_id_ctrl = {
@@ -3077,12 +3209,8 @@ static int rs300_init_controls(struct rs300 *rs300)
     rs300->vi_preferred_stride = v4l2_ctrl_new_custom(ctrl_hdlr, &tegra_vi_preferred_stride_ctrl, NULL);
     rs300->vi_capture_timeout = v4l2_ctrl_new_custom(ctrl_hdlr, &tegra_vi_capture_timeout_ctrl, NULL);
 
-    if (rs300->brightness)
-        rs300->brightness->flags |= V4L2_CTRL_FLAG_VOLATILE;
     if (rs300->colormap)
         rs300->colormap->flags |= V4L2_CTRL_FLAG_VOLATILE;
-    if (rs300->autoshutter)
-        rs300->autoshutter->flags |= V4L2_CTRL_FLAG_VOLATILE;
     if (rs300->camera_sleep)
         rs300->camera_sleep->flags |= V4L2_CTRL_FLAG_VOLATILE;
 
@@ -3230,11 +3358,18 @@ static int rs300_force_tegracam_bus_code(struct rs300 *rs300)
 		return -EINVAL;
 
 	dev = rs300->s_data->dev ? rs300->s_data->dev : &rs300->client->dev;
-	fmt = camera_common_find_datafmt(RS300_DEFAULT_MBUS_CODE);
-	if (!fmt) {
-		dev_err(dev, "Tegra does not know RS300 media bus code 0x%x\n",
-			RS300_DEFAULT_MBUS_CODE);
-		return -EINVAL;
+
+	if (rs300_should_expose_native_y16(rs300)) {
+		fmt = &rs300_native_y16_colorfmt;
+		dev_info(dev,
+			 "Requesting RS300 output_mode=1 as V4L2 Y16 over UYVY CSI transport\n");
+	} else {
+		fmt = camera_common_find_datafmt(RS300_DEFAULT_MBUS_CODE);
+		if (!fmt) {
+			dev_err(dev, "Tegra does not know RS300 media bus code 0x%x\n",
+				RS300_DEFAULT_MBUS_CODE);
+			return -EINVAL;
+		}
 	}
 
 	if (rs300->s_data->colorfmt != fmt)

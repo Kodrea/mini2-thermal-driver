@@ -19,7 +19,7 @@ SET_DEFAULT=0
 UPDATE_EXTLINUX=1
 INSTALL_SERVICE=1
 INSTALL_SLOT_DTB=1
-VIDEO_DEV="/dev/video1"
+VIDEO_DEV="auto"
 
 usage() {
     cat <<'EOF'
@@ -30,7 +30,7 @@ Options:
   --no-extlinux       Do not modify /boot/extlinux/extlinux.conf.
   --no-slot-dtb       Do not update the active A/B kernel-dtb partition.
   --no-service        Do not install/enable rs300-load.service.
-  --video-device DEV  Video node used by the validation service (default: /dev/video1).
+  --video-device DEV  Video node used by the validation service (default: auto-detect rs300).
   -h, --help          Show this help.
 EOF
 }
@@ -312,7 +312,7 @@ install_validation_service() {
 #!/bin/sh
 set -u
 
-DEV="${1:-/dev/video1}"
+DEV_ARG="${1:-auto}"
 WIDTH=640
 HEIGHT=512
 PIX=UYVY
@@ -327,6 +327,20 @@ log() {
     echo "rs300-validate: $*"
 }
 
+find_rs300_video() {
+    for candidate in /dev/video*; do
+        [ -e "$candidate" ] || continue
+
+        if v4l2-ctl -d "$candidate" --info 2>/dev/null |
+            grep -Eiq 'Card type[[:space:]]*:.*(rs300|wn2640)'; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 frame_has_signal() {
     dd if="$OUT" bs="$FRAME_SIZE" skip="$CHECK_FRAME" count=1 2>/dev/null |
         od -An -tu1 -v |
@@ -337,15 +351,33 @@ frame_has_signal() {
 }
 
 wait_dev=0
-while [ ! -e "$DEV" ] && [ "$wait_dev" -lt 30 ]; do
-    sleep 1
-    wait_dev=$((wait_dev + 1))
-done
+if [ "$DEV_ARG" = "auto" ] || [ -z "$DEV_ARG" ]; then
+    DEV=""
+    while [ "$wait_dev" -lt 30 ]; do
+        DEV="$(find_rs300_video || true)"
+        [ -n "$DEV" ] && break
+        sleep 1
+        wait_dev=$((wait_dev + 1))
+    done
 
-if [ ! -e "$DEV" ]; then
-    log "device $DEV did not appear"
-    exit 1
+    if [ -z "$DEV" ]; then
+        log "could not auto-detect rs300 video node"
+        exit 1
+    fi
+else
+    DEV="$DEV_ARG"
+    while [ ! -e "$DEV" ] && [ "$wait_dev" -lt 30 ]; do
+        sleep 1
+        wait_dev=$((wait_dev + 1))
+    done
+
+    if [ ! -e "$DEV" ]; then
+        log "device $DEV did not appear"
+        exit 1
+    fi
 fi
+
+log "using $DEV"
 
 for attempt in 1 2 3; do
     log "attempt $attempt: validating $DEV"
@@ -384,8 +416,6 @@ Type=oneshot
 ExecStart=/sbin/modprobe rs300
 ExecStartPost=${VALIDATE_SCRIPT} ${VIDEO_DEV}
 RemainAfterExit=yes
-Restart=on-failure
-RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -412,7 +442,7 @@ depmod -a
 
 cat >"$MODPROBE_CONF" <<'EOF'
 blacklist rs300
-options rs300 mode=0 fps=60 set_fps_cmd=0 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 start_width=0 start_height=0 advertise_width=0 advertise_height=0 power_on_delay_ms=8000 auto_shutter=1 startup_ffc=0
+options rs300 mode=0 fps=60 set_fps_cmd=0 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 start_width=0 start_height=0 advertise_width=0 advertise_height=0 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
 EOF
 
 if [ "$INSTALL_SERVICE" -eq 1 ]; then

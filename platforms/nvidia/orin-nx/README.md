@@ -23,6 +23,12 @@ radiometric temperature data.
 The Jetson VI exposes the stream as `UYVY`. For human display the useful
 thermal luma is interpreted as `YUY2`; see the GStreamer section.
 
+Important: `output_mode=1` makes the camera send 16-bit thermal samples, but
+the validated Jetson path still carries those samples through the `UYVY`
+transport and the video node still reports `UYVY`. For raw thermal processing,
+read the frame as 640x512 little-endian `uint16` instead of treating it as
+display YUV.
+
 ## Install
 
 Build and install on the Jetson:
@@ -107,15 +113,15 @@ Important controls:
 
 | Control | Type | Meaning |
 |-|-|-|
-| `brightness` | int | GET/SET brightness, 0-100 |
-| `contrast` | int | SET contrast; this WN2640-like module accepts the verified default value `50` |
+| `brightness` | int | SET brightness, 0-100 step 10; readback returns the cached V4L2 value because this firmware reports a non-brightness status byte for GET |
+| `contrast` | int | SET contrast, 0-100; verified default value is `50` |
 | `colormap` | menu | GET/SET palette |
 | `ffc_trigger` | button | Manual FFC command; the tested WN2640-like module rejects it, so periodic `auto_shutter` is the validated calibration path |
 | `scene_mode` | menu | SET scene mode; verified mode is `3` / General Mode |
-| `digital_detail_enhancement` | int | SET DDE; verified value is `50` |
-| `spatial_noise_reduction` | int | SET spatial NR; verified value is `50` |
-| `temporal_noise_reduction` | int | SET temporal NR; verified value is `50` |
-| `output_mode` | menu | YUV or Y16 output mode |
+| `digital_detail_enhancement` | int | SET DDE, 0-100; default value is `0` |
+| `spatial_noise_reduction` | int | SET spatial NR, 0-100; default value is `0` |
+| `temporal_noise_reduction` | int | SET temporal NR, 0-100; default value is `0` |
+| `output_mode` | menu | YUV or Y16 output mode; default is `1` / Y16 |
 | `auto_shutter` | bool | Periodic internal shutter/FFC |
 | `auto_shutter_min_interval` | int | Minimum FFC interval |
 | `auto_shutter_max_interval` | int | Maximum FFC interval |
@@ -128,23 +134,53 @@ Examples:
 
 ```sh
 v4l2-ctl -d /dev/v4l-subdev2 --get-ctrl=brightness
-v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=brightness=55
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=brightness=50
 v4l2-ctl -d /dev/v4l-subdev2 --get-ctrl=colormap
 v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=colormap=10
-v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter=1
-v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter_min_interval=10
-v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter_max_interval=120
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=temporal_noise_reduction=0
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=spatial_noise_reduction=0
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=digital_detail_enhancement=0
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=contrast=50
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=output_mode=1
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=detector_frame_rate=3
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter=0
 ```
 
 The shutter may click periodically when `auto_shutter=1`. That is expected
 thermal flat-field calibration.
+
+Some WN2640-like firmware builds continue to run internal calibration even after
+`auto_shutter=0`. For experiments where fewer shutter events are more important
+than thermal stability, stretch the internal interval:
+
+```sh
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter=0
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter_min_interval=300
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter_max_interval=600
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter_temperature=100
+```
+
+After a capture pipeline stops, the driver may power CAM1 down. The next I2C
+control access powers the camera back up automatically, so the first control
+after `Freeing pipeline ...` can take several seconds.
 
 ## Module Parameters
 
 Defaults in `/etc/modprobe.d/rs300.conf`:
 
 ```text
-mode=0 fps=60 set_fps_cmd=0 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 power_on_delay_ms=8000 auto_shutter=1 startup_ffc=0
+mode=0 fps=60 set_fps_cmd=0 type=16 output_source=-1 yuv_order=2 start_path=1 start_dst=1 power_on_delay_ms=8000 auto_shutter=0 startup_ffc=0 native_y16=0
+```
+
+Camera control defaults applied on stream start:
+
+```text
+digital_detail_enhancement=0
+spatial_noise_reduction=0
+temporal_noise_reduction=0
+auto_shutter=0
+detector_frame_rate=3
+output_mode=1
 ```
 
 Useful parameters:
@@ -158,8 +194,9 @@ Useful parameters:
 | `start_path` | `1` | START packet path byte |
 | `start_dst` | `1` | START packet destination byte |
 | `power_on_delay_ms` | `8000` | Delay after enabling CAM1 power |
-| `auto_shutter` | `1` | Initial periodic shutter state, `-1` leaves firmware default |
+| `auto_shutter` | `0` | Initial periodic shutter state, `-1` leaves firmware default |
 | `startup_ffc` | `0` | Attempt one manual FFC before first stream; leave disabled on the tested WN2640-like module |
+| `native_y16` | `0` | Experimental request to expose `output_mode=1` as `V4L2_PIX_FMT_Y16`; current Tegra camera core keeps the stable `UYVY` pixel format |
 
 For firmware builds that support startup-only manual shutter calibration:
 
@@ -173,13 +210,48 @@ For fully manual shutter control:
 options rs300 ... auto_shutter=0 startup_ffc=0
 ```
 
+## Y16 And UYVY
+
+The tested Jetson/L4T camera stack accepts the RS300 CSI path as `UYVY`, but it
+does not currently accept `VIDIOC_S_FMT pixelformat=Y16` on the Tegra video
+node. With `output_mode=1`, the camera sends 16-bit thermal samples in the same
+2-byte-per-pixel transport, while `/dev/video*` still reports `UYVY`.
+
+The driver contains an experimental `native_y16=1` path that requests
+`V4L2_PIX_FMT_Y16` while keeping the stable UYVY CSI bus code. On the tested
+Orin-NX stack this changes the colorspace to Raw, but Tegra still exposes the
+video node as `UYVY`; therefore the production fallback remains
+`native_y16=0`.
+
+To test the experimental path:
+
+```sh
+sudo modprobe -r rs300
+sudo modprobe rs300 native_y16=1 auto_shutter=0 output_source=-1
+v4l2-ctl -d /dev/videoX --get-fmt-video
+v4l2-ctl -d /dev/videoX --set-fmt-video=width=640,height=512,pixelformat=Y16
+```
+
+If `pixelformat=Y16` is rejected, keep streaming as `UYVY` and reinterpret each
+frame as 640x512 little-endian `uint16` in the receiver or processing software.
+
 ## GStreamer
 
 Stream from the Jetson to a workstation:
 
 ```sh
+sudo systemctl stop rs300-load.service
+v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl=auto_shutter=0
+RS300_VIDEO_DEV="$(for dev in /dev/video*; do
+  v4l2-ctl -d "$dev" --info 2>/dev/null | grep -Eiq 'Card type[[:space:]]*:.*(rs300|wn2640)' && {
+    printf '%s\n' "$dev"
+    break
+  }
+done)"
+test -n "$RS300_VIDEO_DEV"
+
 gst-launch-1.0 -e \
-  v4l2src device=/dev/video1 io-mode=2 do-timestamp=true \
+  v4l2src device="$RS300_VIDEO_DEV" io-mode=2 do-timestamp=true \
   ! 'video/x-raw,format=UYVY,width=640,height=512,framerate=60/1' \
   ! rtpvrawpay pt=96 mtu=1400 \
   ! udpsink host=<WORKSTATION_IP> port=5000 sync=false async=false
@@ -189,7 +261,7 @@ Display on the workstation:
 
 ```sh
 gst-launch-1.0 -e \
-  udpsrc port=5000 caps='application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)RAW,sampling=(string)YCbCr-4:2:2,depth=(string)8,width=(string)640,height=(string)512,colorimetry=(string)BT601-5,payload=(int)96' \
+  udpsrc port=5000 caps='application/x-rtp,media=(string)video,clock-rate=(int)90000,encoding-name=(string)RAW,sampling=(string)YCbCr-4:2:2,depth=(string)8,width=(string)640,height=(string)512,colorimetry=(string)SMPTE240M,payload=(int)96' \
   ! rtpjitterbuffer latency=100 drop-on-latency=true \
   ! rtpvrawdepay \
   ! rawvideoparse use-sink-caps=false format=yuy2 width=640 height=512 framerate=60/1 \
@@ -206,6 +278,11 @@ builds packets, polls status, decodes firmware errors, and reads results for GET
 commands.
 
 The first capture after boot can fail or produce unusable data while Tegra VI and
-the camera settle. `rs300-load.service` performs a readiness validation capture
-and only succeeds once a correctly sized frame set with real byte variance is
-available.
+the camera settle. `rs300-load.service` performs one readiness validation run and
+only succeeds once a correctly sized frame set with real byte variance is
+available. Stop the service before manual streaming if it is still validating, so
+it does not compete for the RS300 video node.
+
+Do not assume a stable `/dev/videoN` number. USB cameras can move the RS300 node;
+on a system with an attached UVC camera it may appear as `/dev/video3` while
+`/dev/video1` belongs to the USB device.

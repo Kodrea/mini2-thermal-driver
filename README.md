@@ -49,6 +49,10 @@ On NVIDIA Jetson Orin, the tested WN2640-like 640x512 module is exposed to
 Tegra as `UYVY`, while the useful display luma is interpreted as `YUY2` in
 GStreamer.
 
+In the validated 16-bit thermal mode, Jetson still transports and reports the
+stream as `UYVY`. Treat each 640x512 frame as 2 bytes per pixel and reinterpret
+the payload as little-endian `uint16` when raw thermal samples are required.
+
 ### Modules
 
 | Module | Resolution | FPS |
