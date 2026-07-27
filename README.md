@@ -26,6 +26,7 @@ Linux kernel driver for the Mini2 / WN2 thermal camera module (Infisense RS300).
 
 | Platform | SoC | Status | Install |
 |-|-|-|-|
+| Jetson Orin NX / Auvidea JNX CAM1 | Tegra Orin | Working | [platforms/nvidia/orin-nx](platforms/nvidia/orin-nx/README.md) |
 | Jetson Orin Nano | Tegra Orin | In development | [platforms/nvidia/orin-nano](platforms/nvidia/orin-nano/README.md) |
 
 ## Quick Start
@@ -43,6 +44,14 @@ Each platform carries its own copy of `rs300.c`. See [SYNC.md](SYNC.md) for the 
 - **Sensor:** RS300 (Infisense)
 - **Interface:** I2C (0x3c) + MIPI CSI-2 (2 lanes, 80 MHz)
 - **Pixel format:** UYVY
+
+On NVIDIA Jetson Orin, the tested WN2640-like 640x512 module is exposed to
+Tegra as `UYVY`, while the useful display luma is interpreted as `YUY2` in
+GStreamer.
+
+In the validated 16-bit thermal mode, Jetson still transports and reports the
+stream as `UYVY`. Treat each 640x512 frame as 2 bytes per pixel and reinterpret
+the payload as little-endian `uint16` when raw thermal samples are required.
 
 ### Modules
 
