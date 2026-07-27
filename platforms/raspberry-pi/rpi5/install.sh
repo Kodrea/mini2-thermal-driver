@@ -338,15 +338,23 @@ install_dependencies() {
 
     # Check each required package. The gir1.2-* / gstreamer1.0-* / python3-gi
     # packages back the rs300-stream live viewer (GTK + GStreamer).
-    for pkg in raspberrypi-kernel-headers dkms v4l-utils i2c-tools \
+    for pkg in dkms v4l-utils i2c-tools \
                device-tree-compiler python3-gi python3-gi-cairo \
                gir1.2-gtk-3.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
                gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
                gstreamer1.0-plugins-bad gstreamer1.0-gtk3; do
-        if ! dpkg -l 2>/dev/null | grep -q "^ii  $pkg "; then
-            missing_pkgs+=($pkg)
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            missing_pkgs+=("$pkg")
         fi
     done
+
+    # Kernel headers are named per running kernel on current Raspberry Pi OS,
+    # so there is no single correct package name to hard-code. Test for the
+    # build tree DKMS actually needs, and derive the package from the running
+    # kernel. This matches the other platform installers.
+    if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+        missing_pkgs+=("linux-headers-$(uname -r)")
+    fi
 
     if [ ${#missing_pkgs[@]} -eq 0 ]; then
         print_success "All required packages are installed"
