@@ -630,6 +630,24 @@ install_helpers() {
     sudo install -D -m 0644 "$rules_src" "$rules_dst"
     sudo udevadm control --reload-rules
     print_success "Sensor subdev udev rule installed: $rules_dst"
+
+    # The RP1 CFE creates the capture link disabled, so it has to be enabled on
+    # every boot before VIDIOC_STREAMON will succeed. Format propagation in the
+    # driver does not cover this.
+    local media_src="helpers/rs300-media-setup.sh"
+    local unit_src="helpers/rs300-media-setup.service"
+
+    if [ ! -r "$media_src" ] || [ ! -r "$unit_src" ]; then
+        print_error "$media_src or $unit_src not found"
+        echo "  Run this installer from platforms/raspberry-pi/rpi5/"
+        exit 2
+    fi
+
+    sudo install -D -m 0755 "$media_src" /usr/lib/rs300/rs300-media-setup.sh
+    sudo install -D -m 0644 "$unit_src" /etc/systemd/system/rs300-media-setup.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable rs300-media-setup.service >/dev/null 2>&1
+    print_success "Capture link service installed and enabled: rs300-media-setup"
     echo ""
 }
 
@@ -646,12 +664,14 @@ show_next_steps() {
     echo "Next steps:"
     echo ""
     echo -e "  1. ${BLUE}sudo reboot${NC}"
-    echo -e "  2. ${BLUE}dmesg | grep rs300${NC}        (verify module loaded)"
-    echo -e "  3. ${BLUE}v4l2-ctl --list-devices${NC}   (confirm /dev/video0)"
-    echo -e "  4. ${BLUE}rs300-stream${NC}              (live thermal preview)"
+    echo -e "  2. ${BLUE}dmesg | grep rs300${NC}                      (verify module loaded)"
+    echo -e "  3. ${BLUE}systemctl status rs300-media-setup${NC}      (capture link enabled)"
+    echo -e "  4. ${BLUE}v4l2-ctl --list-devices${NC}                 (confirm /dev/video0)"
+    echo -e "  5. ${BLUE}rs300-stream${NC}                            (live thermal preview)"
     echo ""
     echo "Configuration:"
     echo "  Module params: /etc/modprobe.d/rs300.conf"
+    echo "  Capture link:  /usr/lib/rs300/rs300-media-setup.sh (via rs300-media-setup.service)"
     echo "  Uninstall:     sudo dkms remove -m ${DRV_NAME} -v ${DRV_VERSION} --all"
     echo ""
 }

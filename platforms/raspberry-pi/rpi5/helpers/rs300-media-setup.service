@@ -1,0 +1,14 @@
+[Unit]
+Description=Enable the rs300 CSI-2 bypass capture link
+Documentation=https://github.com/Kodrea/mini2-thermal-driver
+After=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/rs300/rs300-media-setup.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

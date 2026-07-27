@@ -36,6 +36,7 @@ sudo ./install.sh --auto 256 25 y   # 256x192 @ 25fps
 - **Device tree overlay** (`rs300.dtbo`) and `config.txt` entry
 - **`rs300-stream`** live viewer (GTK + GStreamer) in `/usr/local/bin`
 - **Module config** for resolution and FPS stored in `/etc/modprobe.d/rs300.conf`
+- **`rs300-media-setup.service`** which enables the CSI-2 capture link on every boot
 
 ## After Reboot
 
@@ -43,8 +44,19 @@ Verify the module loaded and the camera enumerated:
 
 ```bash
 dmesg | grep rs300              # module probe messages
+systemctl status rs300-media-setup   # capture link enabled
 v4l2-ctl --list-devices         # expect /dev/video0 plus rs300 subdevs
 v4l2-ctl -d /dev/v4l-subdev2 --get-subdev-fmt pad=0   # sensor resolution
+```
+
+The RP1 CFE creates the link that carries frames to the capture node in a
+disabled state, so it has to be enabled after every boot.
+`rs300-media-setup.service` does that. If capture fails with
+`VIDIOC_STREAMON returned -1 (Invalid argument)` and `dmesg` shows
+`csi2_ch0 node link is not enabled`, run it by hand:
+
+```bash
+sudo /usr/lib/rs300/rs300-media-setup.sh
 ```
 
 Live thermal preview:
@@ -116,6 +128,10 @@ sudo rm -f /usr/local/bin/rs300-stream
 sudo rm -f /boot/firmware/overlays/rs300.dtbo
 sudo rm -f /etc/udev/rules.d/99-rs300.rules
 sudo rm -f /etc/modprobe.d/rs300.conf
+sudo systemctl disable --now rs300-media-setup.service
+sudo rm -f /etc/systemd/system/rs300-media-setup.service
+sudo rm -rf /usr/lib/rs300
+sudo systemctl daemon-reload
 sudo udevadm control --reload-rules
 ```
 
@@ -131,3 +147,5 @@ Then remove the `dtoverlay=rs300` line from `/boot/firmware/config.txt` and rebo
 | `Makefile` | DKMS build |
 | `dkms.conf` | DKMS config |
 | `helpers/rs300-stream.py` | Live viewer (GTK + GStreamer) |
+| `helpers/rs300-media-setup.sh` | Enables the CSI-2 capture link |
+| `helpers/rs300-media-setup.service` | Runs the capture link setup at boot |

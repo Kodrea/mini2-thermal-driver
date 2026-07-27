@@ -14,6 +14,7 @@ Logging: every v4l2-ctl call is logged to stderr and appended to
 """
 import atexit
 import datetime
+import glob
 import os
 import signal
 import subprocess
@@ -184,6 +185,39 @@ def _propagate_csi_format(width, height):
                    '-d', csi_dev])
 
 
+def _ensure_capture_link():
+    """Enable the CSI-2 bypass link that carries frames to the capture node.
+
+    The RP1 CFE creates that link disabled, and the driver's format propagation
+    does not cover it, so a stream-on fails with EINVAL and the kernel logs
+    "csi2_ch0 node link is not enabled". rs300-media-setup.service normally does
+    this at boot. It is repeated here so the viewer also works from a repo
+    checkout, or when the service has been disabled. media-ctl link changes are
+    idempotent, so re-applying an already enabled link is harmless."""
+    media_dev = None
+    for candidate in sorted(glob.glob('/dev/media*')):
+        probe = subprocess.run(['media-ctl', '-d', candidate, '-p'],
+                               capture_output=True, text=True)
+        if 'rs300' in probe.stdout:
+            media_dev = candidate
+            break
+    if media_dev is None:
+        _log('Capture link: no media device exposes the rs300 sensor')
+        return
+
+    # Source pad 4 routes either to the ISP front end or to the bypass capture
+    # node, not both. This viewer uses the bypass path.
+    for link, required in ((["'csi2':4 -> 'pisp-fe':0 [0]"], False),
+                           (["'csi2':4 -> 'rp1-cfe-csi2_ch0':0 [1]"], True)):
+        cmd = ['media-ctl', '-d', media_dev, '-l', link[0]]
+        _log(f'CMD: {" ".join(cmd)}')
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0 and required:
+            _log(f'Capture link: enable failed rc={result.returncode} '
+                 f'{result.stderr.strip()}')
+
+
+_ensure_capture_link()
 _propagate_csi_format(WIDTH, HEIGHT)
 
 PIPELINE = (
