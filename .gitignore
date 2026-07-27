@@ -3,3 +3,6 @@ NOTES.md
 *.yuv
 *.mp4
 *.dtbo
+__pycache__/
+*.pyc
+*.tmp.*

@@ -9,13 +9,13 @@
 # - No automatic service enablement
 # - Clear instructions for manual activation
 #
-# Usage: ./setup.sh [--auto [RESOLUTION FPS CONFIRM]] [--help]
+# Usage: ./install.sh [--auto [RESOLUTION FPS CONFIRM]] [--help]
 #
 # Examples:
-#   ./setup.sh                          # Interactive mode
-#   ./setup.sh --auto                   # Auto-install with interactive config
-#   ./setup.sh --auto 640 60 y          # Auto-install with CLI args (640x512@60fps, confirm)
-#   ./setup.sh --auto 384 30 y          # Auto-install 384x288@30fps
+#   ./install.sh                          # Interactive mode
+#   ./install.sh --auto                   # Auto-install with interactive config
+#   ./install.sh --auto 640 60 y          # Auto-install with CLI args (640x512@60fps, confirm)
+#   ./install.sh --auto 384 30 y          # Auto-install 384x288@30fps
 
 set -e
 
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
             cat <<'EOF'
 RS300 Driver Installation Script
 
-Usage: ./setup.sh [OPTIONS] [RESOLUTION] [FPS] [CONFIRM]
+Usage: ./install.sh [OPTIONS] [RESOLUTION] [FPS] [CONFIRM]
 
 Options:
     --auto              Non-interactive mode (auto-install dependencies)
@@ -93,10 +93,10 @@ CLI Arguments (only with --auto):
     CONFIRM             y/Y for yes, anything else for no (defaults to interactive)
 
 Examples:
-    ./setup.sh                              # Interactive mode
-    ./setup.sh --auto                       # Auto-install with interactive config
-    ./setup.sh --auto 640 60 y              # Auto-install 640x512@60fps
-    ./setup.sh --auto 384 30 y              # Auto-install 384x288@30fps
+    ./install.sh                              # Interactive mode
+    ./install.sh --auto                       # Auto-install with interactive config
+    ./install.sh --auto 640 60 y              # Auto-install 640x512@60fps
+    ./install.sh --auto 384 30 y              # Auto-install 384x288@30fps
 
 This script installs:
   - RS300 kernel module via DKMS
@@ -338,15 +338,23 @@ install_dependencies() {
 
     # Check each required package. The gir1.2-* / gstreamer1.0-* / python3-gi
     # packages back the rs300-stream live viewer (GTK + GStreamer).
-    for pkg in raspberrypi-kernel-headers dkms v4l-utils i2c-tools \
+    for pkg in dkms v4l-utils i2c-tools \
                device-tree-compiler python3-gi python3-gi-cairo \
                gir1.2-gtk-3.0 gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
                gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
                gstreamer1.0-plugins-bad gstreamer1.0-gtk3; do
-        if ! dpkg -l 2>/dev/null | grep -q "^ii  $pkg "; then
-            missing_pkgs+=($pkg)
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            missing_pkgs+=("$pkg")
         fi
     done
+
+    # Kernel headers are named per running kernel on current Raspberry Pi OS,
+    # so there is no single correct package name to hard-code. Test for the
+    # build tree DKMS actually needs, and derive the package from the running
+    # kernel. This matches the other platform installers.
+    if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+        missing_pkgs+=("linux-headers-$(uname -r)")
+    fi
 
     if [ ${#missing_pkgs[@]} -eq 0 ]; then
         print_success "All required packages are installed"

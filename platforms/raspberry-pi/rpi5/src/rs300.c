@@ -85,7 +85,7 @@ static const char * const output_mode_menu[] = {
 
 #define NUM_COLORMAP_ITEMS (ARRAY_SIZE(colormap_menu) - 1) // Account for NULL terminator
 
-// Mode must be set before running setup.sh
+// Mode must be set before running install.sh
 // TODO: Make mode adjustable during runtime
 static int mode = 2; // 0-640; 1-256; 2-384
 static int fps = 60;
@@ -2162,10 +2162,15 @@ static int rs300_get_pad_fmt(struct v4l2_subdev *sd,
  * ("Wrong width or height ...") whenever the receiver still holds its
  * power-on default.
  *
- * May be called with or without rs300->mutex held. Fail-soft: logs and
- * returns an errno on any problem (including "no downstream pad linked
- * yet") so the same code is safe to call from the propagate work or
- * set_pad_fmt. Returns 0 only when the receiver accepted the format.
+ * Caller must hold rs300->mutex: this reads rs300->fmt through
+ * __rs300_get_pad_fmt() and updates rs300->propagate_logged. Both callers
+ * (the propagate work and set_pad_fmt) already hold it. The remote
+ * subdev's own active state is locked here, so the lock order is always
+ * rs300->mutex then remote state.
+ *
+ * Fail-soft: logs and returns an errno on any problem (including "no
+ * downstream pad linked yet") so it is safe to call before the bridge has
+ * bound. Returns 0 only when the receiver accepted the format.
  */
 static int rs300_propagate_fmt_to_sink(struct rs300 *rs300)
 {
