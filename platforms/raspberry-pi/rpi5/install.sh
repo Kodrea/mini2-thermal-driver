@@ -409,10 +409,55 @@ install_kernel_module() {
     print_status "Installing kernel module via DKMS..."
     echo ""
 
-    # Remove old version if exists
-    if sudo dkms status | grep -q "${DRV_NAME}"; then
-        print_status "Removing previous installation..."
-        sudo dkms remove -m ${DRV_NAME} -v ${DRV_VERSION} --all 2>/dev/null || true
+    # Remove any previous installation.
+    #
+    # Older builds registered this module as rs300-dkms rather than rs300. A
+    # substring test for the current name also matches the old one, so the
+    # check passed, the remove of the current name failed because nothing was
+    # registered under it, and the error was discarded. The upgrade then left
+    # two DKMS trees both producing rs300.ko. Enumerate what is actually
+    # registered and remove each entry by its real name and version.
+    local dkms_status entry head name version
+    dkms_status=$(sudo dkms status 2>/dev/null || true)
+
+    if [ -n "$dkms_status" ]; then
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            # dkms status has three shapes, and all three appear in practice:
+            #   "name/version, kernel, arch: state"  once built
+            #   "name/version: state"                when only added
+            #   "name, version, kernel, arch: state" on older dkms
+            # Reduce to the leading "name/version" (or "name") in every case.
+            head=${entry%%,*}
+            head=${head%%:*}
+            head=$(printf '%s' "$head" | xargs)
+
+            if [[ "$head" == */* ]]; then
+                name=${head%%/*}
+                version=${head##*/}
+            else
+                name=$head
+                version=$(printf '%s' "$entry" | awk -F, '{print $2}' | xargs)
+            fi
+            [ -n "$name" ] && [ -n "$version" ] || continue
+
+            if [ "$name" = "${DRV_NAME}" ] || [ "$name" = "${DRV_NAME}-dkms" ]; then
+                print_status "Removing previous installation: ${name}/${version}"
+                if ! sudo dkms remove -m "$name" -v "$version" --all 2>/dev/null; then
+                    print_warning "Could not remove ${name}/${version}, continuing"
+                fi
+            fi
+        done <<< "$dkms_status"
+    fi
+
+    # A failed removal above would leave a stale module that depmod still
+    # resolves, so the old binary could load in place of the new one.
+    local stale
+    stale=$(find "/lib/modules/$(uname -r)/updates/dkms" -name "${DRV_NAME}.ko*" 2>/dev/null | head -1)
+    if [ -n "$stale" ]; then
+        print_warning "Stale module still present: $stale"
+        sudo rm -f "$stale"
+        sudo depmod -a
     fi
 
     # Create source directory

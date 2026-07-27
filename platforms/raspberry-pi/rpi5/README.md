@@ -65,6 +65,15 @@ disabled state, so it has to be enabled after every boot.
 sudo /usr/lib/rs300/rs300-media-setup.sh
 ```
 
+The CSI-2 receiver can route either to the ISP front end or to the bypass
+capture node, but not to both. This driver uses the bypass path, so the service
+drops the front end link each boot. If you are using the ISP for something else
+on the same camera, disable the service and set the links up yourself:
+
+```bash
+sudo systemctl disable --now rs300-media-setup.service
+```
+
 ### Confirm frames without a display
 
 `rs300-stream` needs a desktop session. On a headless Pi, capture straight from
