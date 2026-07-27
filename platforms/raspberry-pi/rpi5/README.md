@@ -19,6 +19,12 @@ sudo reboot
 ```
 
 The installer will ask which module you have and your preferred frame rate.
+384x288 and 640x512 modules support 30 or 60 fps; 256x192 modules support 25 or
+50 fps. Pick the higher rate unless you are short on bandwidth or CPU.
+
+Run this at an interactive terminal. It prompts for input, so driving it through
+a non-interactive SSH command exits at the first prompt without an error. For
+that case use the scripted form below.
 
 ### Scripted Install
 
@@ -45,7 +51,7 @@ Verify the module loaded and the camera enumerated:
 ```bash
 dmesg | grep rs300              # module probe messages
 systemctl status rs300-media-setup   # capture link enabled
-v4l2-ctl --list-devices         # expect /dev/video0 plus rs300 subdevs
+v4l2-ctl --list-devices         # expect /dev/video0 under the rp1-cfe group
 v4l2-ctl -d /dev/v4l-subdev2 --get-subdev-fmt pad=0   # sensor resolution
 ```
 
@@ -59,7 +65,31 @@ disabled state, so it has to be enabled after every boot.
 sudo /usr/lib/rs300/rs300-media-setup.sh
 ```
 
-Live thermal preview:
+### Confirm frames without a display
+
+`rs300-stream` needs a desktop session. On a headless Pi, capture straight from
+the video node instead. Substitute your module's resolution:
+
+```bash
+v4l2-ctl -d /dev/video0 --set-fmt-video=width=384,height=288,pixelformat=YUYV \
+  --stream-mmap --stream-count=300 --stream-to=/tmp/capture.yuv
+ls -l /tmp/capture.yuv
+```
+
+A 384x288 YUYV frame is 221184 bytes, so 300 frames is exactly 66355200 bytes.
+Any other size means frames were dropped.
+
+The sensor settles to a nearly constant image on a static scene, so a capture
+can look frozen while the pipeline is healthy. To prove frames are live, trigger
+FFC while the capture is running rather than before it:
+
+```bash
+( sleep 3; v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl ffc_trigger=1 ) &
+v4l2-ctl -d /dev/video0 --set-fmt-video=width=384,height=288,pixelformat=YUYV \
+  --stream-mmap --stream-count=300 --stream-to=/tmp/capture.yuv
+```
+
+Live thermal preview, on a Pi with a display:
 
 ```bash
 rs300-stream
@@ -139,7 +169,13 @@ sudo systemctl daemon-reload
 sudo udevadm control --reload-rules
 ```
 
-Then remove the `dtoverlay=rs300` line from `/boot/firmware/config.txt` and reboot.
+Then remove the overlay line from the boot config and reboot:
+
+```bash
+sudo sed -i '/^dtoverlay=rs300$/d' /boot/firmware/config.txt
+grep -c rs300 /boot/firmware/config.txt   # expect 0
+sudo reboot
+```
 
 ## Files
 

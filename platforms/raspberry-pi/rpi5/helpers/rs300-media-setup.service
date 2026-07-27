@@ -1,7 +1,11 @@
 [Unit]
 Description=Enable the rs300 CSI-2 bypass capture link
 Documentation=https://github.com/Kodrea/mini2-thermal-driver
-After=multi-user.target
+# Deliberately not ordered After=multi-user.target. That runs the unit only once
+# the whole target is reached, which is after sshd, leaving a window where a user
+# can log in and capture before the link is enabled. The script polls for the
+# media device, so starting early and waiting is both safer and faster.
+After=local-fs.target
 
 [Service]
 Type=oneshot

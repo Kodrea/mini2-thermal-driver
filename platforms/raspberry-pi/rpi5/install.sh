@@ -487,31 +487,31 @@ install_device_tree() {
     echo ""
 
     # ========== COMPILATION ==========
-    if [ ! -f "$compiled_file" ]; then
-        print_status "Compiling device tree overlay from source..."
+    # Always recompile from source. A leftover .dtbo in the working directory
+    # would otherwise be installed in preference to the tracked .dts, silently
+    # shipping a stale overlay on any reused checkout.
+    rm -f "$compiled_file"
+    print_status "Compiling device tree overlay from source..."
 
-        # Compile and capture output
-        if ! dtc -@ -H epapr -O dtb -o "$compiled_file" "$src_file" > "$temp_log" 2>&1; then
-            print_error "Failed to compile device tree overlay"
-            echo "  Error output:"
-            sed 's/^/    /' "$temp_log"
-            rm -f "$temp_log"
-            exit 2
-        fi
-
-        # Verify compiled file exists and has reasonable size (> 100 bytes)
-        if [ ! -f "$compiled_file" ] || [ ! -s "$compiled_file" ]; then
-            print_error "Compilation produced invalid overlay file"
-            rm -f "$temp_log"
-            exit 2
-        fi
-
-        local file_size=$(stat -c%s "$compiled_file" 2>/dev/null || echo "unknown")
-        print_success "Device tree overlay compiled ($file_size bytes)"
+    # Compile and capture output
+    if ! dtc -@ -H epapr -O dtb -o "$compiled_file" "$src_file" > "$temp_log" 2>&1; then
+        print_error "Failed to compile device tree overlay"
+        echo "  Error output:"
+        sed 's/^/    /' "$temp_log"
         rm -f "$temp_log"
-    else
-        print_status "Using pre-compiled overlay: $compiled_file"
+        exit 2
     fi
+
+    # Verify compiled file exists and has reasonable size (> 100 bytes)
+    if [ ! -f "$compiled_file" ] || [ ! -s "$compiled_file" ]; then
+        print_error "Compilation produced invalid overlay file"
+        rm -f "$temp_log"
+        exit 2
+    fi
+
+    local file_size=$(stat -c%s "$compiled_file" 2>/dev/null || echo "unknown")
+    print_success "Device tree overlay compiled ($file_size bytes)"
+    rm -f "$temp_log"
     echo ""
 
     # ========== INSTALLATION WITH VERIFICATION ==========
