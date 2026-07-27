@@ -55,6 +55,29 @@ v4l2-ctl --list-devices         # expect /dev/video0 under the rp1-cfe group
 v4l2-ctl -d /dev/v4l-subdev2 --get-subdev-fmt pad=0   # sensor resolution
 ```
 
+`dmesg` prints several `Fixed dependency cycle(s)` lines before the probe
+messages. Those are normal and come from the device tree linking the sensor and
+the CSI receiver to each other. The lines that indicate success are:
+
+```
+rs300 10-003c: Starting rs300_probe
+rp1-cfe 1f00110000.csi: Using sensor rs300 10-003c for capture
+rs300 10-003c: Propagated 384x288 code=0x2011 to downstream pad 0
+```
+
+`rs300-media-setup` is a oneshot service, so a healthy install reports
+`active (exited)` rather than `active (running)`:
+
+```
+Active: active (exited) since ...
+Process: 622 ExecStart=/usr/lib/rs300/rs300-media-setup.sh (code=exited, status=0/SUCCESS)
+rs300-media-setup.sh[622]: rs300-media-setup: bypass capture link enabled on /dev/media2
+```
+
+The media device number changes between boots, so yours may not be `/dev/media2`.
+The service detects the right one by looking for the sensor rather than assuming
+a number.
+
 The RP1 CFE creates the link that carries frames to the capture node in a
 disabled state, so it has to be enabled after every boot.
 `rs300-media-setup.service` does that. If capture fails with
@@ -81,22 +104,54 @@ the video node instead. Substitute your module's resolution:
 
 ```bash
 v4l2-ctl -d /dev/video0 --set-fmt-video=width=384,height=288,pixelformat=YUYV \
-  --stream-mmap --stream-count=300 --stream-to=/tmp/capture.yuv
+  --stream-mmap --stream-count=600 --stream-to=/tmp/capture.yuv
 ls -l /tmp/capture.yuv
 ```
 
-A 384x288 YUYV frame is 221184 bytes, so 300 frames is exactly 66355200 bytes.
+A 384x288 YUYV frame is 221184 bytes, so 600 frames is exactly 132710400 bytes.
 Any other size means frames were dropped.
+
+`v4l2-ctl` prints a frame rate as it captures. The figure is measured over each
+reporting interval, not over the run as a whole, and the stream takes roughly
+2.6 seconds to deliver its first frame. The first five values therefore climb
+from near zero while the stream starts, after which every value reads the
+configured rate:
+
+```
+1.51 fps  8.64 fps  21.44 fps  29.14 fps  34.27 fps  60.00 fps  60.00 fps ...
+```
+
+Only the settled values mean anything. 600 frames is used here because it runs
+well past the startup climb; a shorter capture can end while the figure is still
+rising and look like a rate problem when there is none.
 
 The sensor settles to a nearly constant image on a static scene, so a capture
 can look frozen while the pipeline is healthy. To prove frames are live, trigger
 FFC while the capture is running rather than before it:
 
 ```bash
-( sleep 3; v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl ffc_trigger=1 ) &
+( sleep 5; v4l2-ctl -d /dev/v4l-subdev2 --set-ctrl ffc_trigger=1 ) &
 v4l2-ctl -d /dev/video0 --set-fmt-video=width=384,height=288,pixelformat=YUYV \
-  --stream-mmap --stream-count=300 --stream-to=/tmp/capture.yuv
+  --stream-mmap --stream-count=600 --stream-to=/tmp/capture.yuv
 ```
+
+To confirm the frames actually differ, hash each one and count the distinct
+values. Substitute your module's resolution in the frame size:
+
+```bash
+python3 - <<'PY'
+import hashlib
+frame = 384 * 288 * 2
+data = open('/tmp/capture.yuv', 'rb').read()
+h = [hashlib.md5(data[i:i + frame]).hexdigest()
+     for i in range(0, len(data), frame)]
+print(len(h), 'frames,', len(set(h)), 'distinct')
+PY
+```
+
+With a mid-capture FFC, expect most frames to be distinct. Around 424 distinct
+out of 600 is typical on a static scene. A result of 1 distinct frame means the
+same buffer is being delivered repeatedly.
 
 Live thermal preview, on a Pi with a display:
 
