@@ -1,0 +1,20 @@
+# rs300-stream.py dependencies
+#
+# rs300-stream.py needs the GTK 3 and GStreamer 1.0 Python (PyGObject)
+# bindings plus the GStreamer plugins the pipeline uses (v4l2src,
+# videoconvert, gtksink). On Raspberry Pi OS (Bookworm) install them with:
+
+sudo apt install -y \
+  python3-gi \
+  python3-gi-cairo \
+  gir1.2-gtk-3.0 \
+  gir1.2-gstreamer-1.0 \
+  gir1.2-gst-plugins-base-1.0 \
+  gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good \
+  gstreamer1.0-plugins-bad \
+  gstreamer1.0-gtk3
+
+# install.sh installs these automatically. This file is for users who run
+# rs300-stream.py directly from a repo checkout, and is the source the
+# script's "missing dependencies" message points at.

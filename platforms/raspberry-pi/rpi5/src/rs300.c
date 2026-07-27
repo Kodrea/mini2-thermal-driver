@@ -20,6 +20,7 @@
 #include <linux/uaccess.h>
 #include <linux/videodev2.h>
 #include <linux/version.h>
+#include <linux/workqueue.h>
 #include <media/media-entity.h>
 #include <media/v4l2-common.h>
 #include <media/v4l2-ctrls.h>
@@ -265,8 +266,10 @@ struct rs300 {
 	/* Streaming on/off */
 	bool streaming;
 
-	/* Deferred YUV format configuration (set on first stream start) */
-	bool yuv_format_configured;
+	/* Boot-time format propagation to the CSI-2 receiver */
+	struct delayed_work propagate_work;
+	int propagate_retries;
+	bool propagate_logged;
 };
 
 /* Autoshutter function prototypes (after struct rs300 definition) */
@@ -1012,7 +1015,7 @@ static int rs300_set_output_mode(struct rs300 *rs300, int value)
     return -ETIMEDOUT;
 }
 
-static int rs300_set_yuv_format(struct rs300 *rs300, int format)
+static int __maybe_unused rs300_set_yuv_format(struct rs300 *rs300, int format)
 {
     struct i2c_client *client = v4l2_get_subdevdata(&rs300->sd);
     u8 cmd_buffer[18];
@@ -2152,7 +2155,130 @@ static int rs300_get_pad_fmt(struct v4l2_subdev *sd,
 	return ret;
 }
 
-// Fix rs300_set_pad_fmt to use v4l2_subdev_get_fmt
+/*
+ * Propagate the rs300 source-pad format to the linked CSI-2 receiver sink
+ * pad. The Pi 5 CFE (RP1) does not auto-read the sensor source pad format,
+ * so a stream-on issued through v4l2-ctl or media-ctl fails link validation
+ * ("Wrong width or height ...") whenever the receiver still holds its
+ * power-on default.
+ *
+ * May be called with or without rs300->mutex held. Fail-soft: logs and
+ * returns an errno on any problem (including "no downstream pad linked
+ * yet") so the same code is safe to call from the propagate work or
+ * set_pad_fmt. Returns 0 only when the receiver accepted the format.
+ */
+static int rs300_propagate_fmt_to_sink(struct rs300 *rs300)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&rs300->sd);
+	struct media_pad *remote =
+		media_pad_remote_pad_first(&rs300->pad[IMAGE_PAD]);
+	struct v4l2_subdev_format src_fmt = {
+		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+		.pad = IMAGE_PAD,
+	};
+	struct v4l2_subdev_format remote_fmt = {
+		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
+	};
+	struct v4l2_subdev_state *remote_state;
+	struct v4l2_subdev *remote_sd;
+	int ret;
+
+	if (!remote || !is_media_entity_v4l2_subdev(remote->entity)) {
+		dev_dbg(&client->dev,
+			"Format propagation: no downstream subdev linked yet");
+		return -ENODEV;
+	}
+	remote_sd = media_entity_to_v4l2_subdev(remote->entity);
+
+	/*
+	 * Reuse __rs300_get_pad_fmt() so the sink pad receives the same
+	 * output_mode-translated code a get_fmt on the source pad reports.
+	 * Its ACTIVE branch does not dereference sd_state, so NULL is safe.
+	 */
+	ret = __rs300_get_pad_fmt(rs300, NULL, &src_fmt);
+	if (ret) {
+		dev_warn(&client->dev,
+			 "Format propagation: cannot read source format: %d",
+			 ret);
+		return ret;
+	}
+
+	remote_fmt.pad = remote->index;
+	remote_fmt.format = src_fmt.format;
+
+	/*
+	 * Set the receiver's sink pad through its locked active state -- the
+	 * same path VIDIOC_SUBDEV_S_FMT takes. A NULL state does not persist
+	 * on the rp1-cfe csi2 subdev under kernel 6.12.
+	 *
+	 * -ENOIOCTLCMD here means the receiver has no set_fmt yet, i.e. it is
+	 * not ready -- treat it as a failure so the caller retries, rather
+	 * than reporting a success that never reached the hardware.
+	 */
+	remote_state = v4l2_subdev_lock_and_get_active_state(remote_sd);
+	ret = v4l2_subdev_call(remote_sd, pad, set_fmt, remote_state, &remote_fmt);
+	if (remote_state)
+		v4l2_subdev_unlock_state(remote_state);
+
+	if (ret) {
+		dev_warn(&client->dev,
+			 "Failed to propagate format to downstream pad: %d",
+			 ret);
+		return ret;
+	}
+
+	if (!rs300->propagate_logged) {
+		dev_info(&client->dev,
+			 "Propagated %dx%d code=0x%x to downstream pad %d",
+			 remote_fmt.format.width, remote_fmt.format.height,
+			 remote_fmt.format.code, remote->index);
+		rs300->propagate_logged = true;
+	} else {
+		dev_dbg(&client->dev,
+			"Re-propagated %dx%d to downstream pad %d",
+			remote_fmt.format.width, remote_fmt.format.height,
+			remote->index);
+	}
+	return 0;
+}
+
+/*
+ * Boot-time format propagation to the CSI-2 receiver.
+ *
+ * The rp1-cfe bridge links the sensor to its receiver from an async-notifier
+ * callback that runs after rs300_probe() returns, and it creates that link
+ * ENABLED|IMMUTABLE -- so the link_setup entity op is never invoked for it
+ * (the kernel only calls link_setup on the mutable state-change path).
+ * media_pad_remote_pad_first() is also unsafe until the entity is registered
+ * with a media device: entity->links is only INIT_LIST_HEAD'd inside
+ * media_device_register_entity(), and graph_obj.mdev is set at the same point.
+ *
+ * A single propagation does not hold: the receiver is not ready when the
+ * link first appears, and rp1-cfe re-defaults the csi2 pad formats during
+ * its own late init. So this work re-propagates on a fixed interval across
+ * the early-boot window, which lets a plain "v4l2-ctl --stream-mmap" with no
+ * prior media-ctl setup pass the receiver's link validation.
+ */
+#define RS300_PROPAGATE_MAX_RETRIES	80
+#define RS300_PROPAGATE_INTERVAL_MS	500
+
+static void rs300_propagate_work(struct work_struct *work)
+{
+	struct rs300 *rs300 = container_of(to_delayed_work(work),
+					   struct rs300, propagate_work);
+
+	if (rs300->sd.entity.graph_obj.mdev &&
+	    media_pad_remote_pad_first(&rs300->pad[IMAGE_PAD])) {
+		mutex_lock(&rs300->mutex);
+		rs300_propagate_fmt_to_sink(rs300);
+		mutex_unlock(&rs300->mutex);
+	}
+
+	if (rs300->propagate_retries++ < RS300_PROPAGATE_MAX_RETRIES)
+		schedule_delayed_work(&rs300->propagate_work,
+			msecs_to_jiffies(RS300_PROPAGATE_INTERVAL_MS));
+}
+
 static int rs300_set_pad_fmt(struct v4l2_subdev *sd,
 			  struct v4l2_subdev_state *sd_state,
 			  struct v4l2_subdev_format *fmt)
@@ -2237,6 +2363,9 @@ static int rs300_set_pad_fmt(struct v4l2_subdev *sd,
 			
 			dev_info(&client->dev, "Set ACTIVE format: code=0x%x, %dx%d",
 				rs300->fmt.code, rs300->fmt.width, rs300->fmt.height);
+
+			/* Push the new format down to the CSI-2 receiver. */
+			rs300_propagate_fmt_to_sink(rs300);
 		}
 	} else {
 		dev_err(&client->dev, "Invalid pad %d", fmt->pad);
@@ -2404,15 +2533,6 @@ static int rs300_set_stream(struct v4l2_subdev *sd, int enable)
             0x00, 0x02, //height&0xff, height>>8 [24-25]
             0x00, 0x00
         };
-
-        /* Deferred YUV format config: set on first stream start when sensor is ready */
-        if (!rs300->yuv_format_configured) {
-            ret = rs300_set_yuv_format(rs300, 2); /* YUYV format */
-            if (ret)
-                dev_warn(&client->dev, "YUV format set failed: %d (continuing)", ret);
-            else
-                rs300->yuv_format_configured = true;
-        }
 
         // Set FPS first
         ret = rs300_set_fps(rs300, fps);
@@ -3378,13 +3498,6 @@ static int rs300_probe(struct i2c_client *client)
 	/* Initialize default format */
 	rs300_set_default_format(rs300);
 
-	/*
-	 * YUV format configuration deferred to first stream start.
-	 * The sensor is not ready for I2C commands during probe,
-	 * causing -121 (EREMOTEIO) errors on register 0x1d00.
-	 */
-	rs300->yuv_format_configured = false;
-
 	/* Initialize mutex */
 	mutex_init(&rs300->mutex);
 	
@@ -3420,6 +3533,15 @@ static int rs300_probe(struct i2c_client *client)
 	if (rs300->sd.ctrl_handler)
 		dev_dbg(dev, "Subdevice control handler initialized\n");
 
+	/*
+	 * Kick off boot-time format propagation. The rp1-cfe link does not
+	 * exist yet; rs300_propagate_work() polls for it and fail-softs if it
+	 * never appears (e.g. no bridge bound).
+	 */
+	INIT_DELAYED_WORK(&rs300->propagate_work, rs300_propagate_work);
+	schedule_delayed_work(&rs300->propagate_work,
+			      msecs_to_jiffies(RS300_PROPAGATE_INTERVAL_MS));
+
 	return 0;
 
 error_media_entity:
@@ -3439,6 +3561,7 @@ static void rs300_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct rs300 *rs300 = to_rs300(sd);
 
+	cancel_delayed_work_sync(&rs300->propagate_work);
 	v4l2_async_unregister_subdev(sd);
 	media_entity_cleanup(&sd->entity);
 	rs300_free_controls(rs300);

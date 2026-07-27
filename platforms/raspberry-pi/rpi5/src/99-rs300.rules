@@ -1,0 +1,1 @@
+SUBSYSTEM=="video4linux", KERNEL=="v4l-subdev*", ATTR{name}=="rs300 *", GROUP="video", MODE="0660"
