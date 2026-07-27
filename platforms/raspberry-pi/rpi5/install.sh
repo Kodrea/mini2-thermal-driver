@@ -409,10 +409,55 @@ install_kernel_module() {
     print_status "Installing kernel module via DKMS..."
     echo ""
 
-    # Remove old version if exists
-    if sudo dkms status | grep -q "${DRV_NAME}"; then
-        print_status "Removing previous installation..."
-        sudo dkms remove -m ${DRV_NAME} -v ${DRV_VERSION} --all 2>/dev/null || true
+    # Remove any previous installation.
+    #
+    # Older builds registered this module as rs300-dkms rather than rs300. A
+    # substring test for the current name also matches the old one, so the
+    # check passed, the remove of the current name failed because nothing was
+    # registered under it, and the error was discarded. The upgrade then left
+    # two DKMS trees both producing rs300.ko. Enumerate what is actually
+    # registered and remove each entry by its real name and version.
+    local dkms_status entry head name version
+    dkms_status=$(sudo dkms status 2>/dev/null || true)
+
+    if [ -n "$dkms_status" ]; then
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            # dkms status has three shapes, and all three appear in practice:
+            #   "name/version, kernel, arch: state"  once built
+            #   "name/version: state"                when only added
+            #   "name, version, kernel, arch: state" on older dkms
+            # Reduce to the leading "name/version" (or "name") in every case.
+            head=${entry%%,*}
+            head=${head%%:*}
+            head=$(printf '%s' "$head" | xargs)
+
+            if [[ "$head" == */* ]]; then
+                name=${head%%/*}
+                version=${head##*/}
+            else
+                name=$head
+                version=$(printf '%s' "$entry" | awk -F, '{print $2}' | xargs)
+            fi
+            [ -n "$name" ] && [ -n "$version" ] || continue
+
+            if [ "$name" = "${DRV_NAME}" ] || [ "$name" = "${DRV_NAME}-dkms" ]; then
+                print_status "Removing previous installation: ${name}/${version}"
+                if ! sudo dkms remove -m "$name" -v "$version" --all 2>/dev/null; then
+                    print_warning "Could not remove ${name}/${version}, continuing"
+                fi
+            fi
+        done <<< "$dkms_status"
+    fi
+
+    # A failed removal above would leave a stale module that depmod still
+    # resolves, so the old binary could load in place of the new one.
+    local stale
+    stale=$(find "/lib/modules/$(uname -r)/updates/dkms" -name "${DRV_NAME}.ko*" 2>/dev/null | head -1)
+    if [ -n "$stale" ]; then
+        print_warning "Stale module still present: $stale"
+        sudo rm -f "$stale"
+        sudo depmod -a
     fi
 
     # Create source directory
@@ -487,31 +532,31 @@ install_device_tree() {
     echo ""
 
     # ========== COMPILATION ==========
-    if [ ! -f "$compiled_file" ]; then
-        print_status "Compiling device tree overlay from source..."
+    # Always recompile from source. A leftover .dtbo in the working directory
+    # would otherwise be installed in preference to the tracked .dts, silently
+    # shipping a stale overlay on any reused checkout.
+    rm -f "$compiled_file"
+    print_status "Compiling device tree overlay from source..."
 
-        # Compile and capture output
-        if ! dtc -@ -H epapr -O dtb -o "$compiled_file" "$src_file" > "$temp_log" 2>&1; then
-            print_error "Failed to compile device tree overlay"
-            echo "  Error output:"
-            sed 's/^/    /' "$temp_log"
-            rm -f "$temp_log"
-            exit 2
-        fi
-
-        # Verify compiled file exists and has reasonable size (> 100 bytes)
-        if [ ! -f "$compiled_file" ] || [ ! -s "$compiled_file" ]; then
-            print_error "Compilation produced invalid overlay file"
-            rm -f "$temp_log"
-            exit 2
-        fi
-
-        local file_size=$(stat -c%s "$compiled_file" 2>/dev/null || echo "unknown")
-        print_success "Device tree overlay compiled ($file_size bytes)"
+    # Compile and capture output
+    if ! dtc -@ -H epapr -O dtb -o "$compiled_file" "$src_file" > "$temp_log" 2>&1; then
+        print_error "Failed to compile device tree overlay"
+        echo "  Error output:"
+        sed 's/^/    /' "$temp_log"
         rm -f "$temp_log"
-    else
-        print_status "Using pre-compiled overlay: $compiled_file"
+        exit 2
     fi
+
+    # Verify compiled file exists and has reasonable size (> 100 bytes)
+    if [ ! -f "$compiled_file" ] || [ ! -s "$compiled_file" ]; then
+        print_error "Compilation produced invalid overlay file"
+        rm -f "$temp_log"
+        exit 2
+    fi
+
+    local file_size=$(stat -c%s "$compiled_file" 2>/dev/null || echo "unknown")
+    print_success "Device tree overlay compiled ($file_size bytes)"
+    rm -f "$temp_log"
     echo ""
 
     # ========== INSTALLATION WITH VERIFICATION ==========
@@ -630,6 +675,24 @@ install_helpers() {
     sudo install -D -m 0644 "$rules_src" "$rules_dst"
     sudo udevadm control --reload-rules
     print_success "Sensor subdev udev rule installed: $rules_dst"
+
+    # The RP1 CFE creates the capture link disabled, so it has to be enabled on
+    # every boot before VIDIOC_STREAMON will succeed. Format propagation in the
+    # driver does not cover this.
+    local media_src="helpers/rs300-media-setup.sh"
+    local unit_src="helpers/rs300-media-setup.service"
+
+    if [ ! -r "$media_src" ] || [ ! -r "$unit_src" ]; then
+        print_error "$media_src or $unit_src not found"
+        echo "  Run this installer from platforms/raspberry-pi/rpi5/"
+        exit 2
+    fi
+
+    sudo install -D -m 0755 "$media_src" /usr/lib/rs300/rs300-media-setup.sh
+    sudo install -D -m 0644 "$unit_src" /etc/systemd/system/rs300-media-setup.service
+    sudo systemctl daemon-reload
+    sudo systemctl enable rs300-media-setup.service >/dev/null 2>&1
+    print_success "Capture link service installed and enabled: rs300-media-setup"
     echo ""
 }
 
@@ -646,12 +709,14 @@ show_next_steps() {
     echo "Next steps:"
     echo ""
     echo -e "  1. ${BLUE}sudo reboot${NC}"
-    echo -e "  2. ${BLUE}dmesg | grep rs300${NC}        (verify module loaded)"
-    echo -e "  3. ${BLUE}v4l2-ctl --list-devices${NC}   (confirm /dev/video0)"
-    echo -e "  4. ${BLUE}rs300-stream${NC}              (live thermal preview)"
+    echo -e "  2. ${BLUE}dmesg | grep rs300${NC}                      (verify module loaded)"
+    echo -e "  3. ${BLUE}systemctl status rs300-media-setup${NC}      (capture link enabled)"
+    echo -e "  4. ${BLUE}v4l2-ctl --list-devices${NC}                 (confirm /dev/video0)"
+    echo -e "  5. ${BLUE}rs300-stream${NC}                            (live thermal preview)"
     echo ""
     echo "Configuration:"
     echo "  Module params: /etc/modprobe.d/rs300.conf"
+    echo "  Capture link:  /usr/lib/rs300/rs300-media-setup.sh (via rs300-media-setup.service)"
     echo "  Uninstall:     sudo dkms remove -m ${DRV_NAME} -v ${DRV_VERSION} --all"
     echo ""
 }
