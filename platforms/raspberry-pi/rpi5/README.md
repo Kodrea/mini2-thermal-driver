@@ -114,6 +114,9 @@ v4l2-ctl --list-devices
 sudo dkms remove -m rs300 -v 0.0.1 --all
 sudo rm -f /usr/local/bin/rs300-stream
 sudo rm -f /boot/firmware/overlays/rs300.dtbo
+sudo rm -f /etc/udev/rules.d/99-rs300.rules
+sudo rm -f /etc/modprobe.d/rs300.conf
+sudo udevadm control --reload-rules
 ```
 
 Then remove the `dtoverlay=rs300` line from `/boot/firmware/config.txt` and reboot.

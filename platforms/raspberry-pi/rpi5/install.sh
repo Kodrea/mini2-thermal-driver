@@ -9,13 +9,13 @@
 # - No automatic service enablement
 # - Clear instructions for manual activation
 #
-# Usage: ./setup.sh [--auto [RESOLUTION FPS CONFIRM]] [--help]
+# Usage: ./install.sh [--auto [RESOLUTION FPS CONFIRM]] [--help]
 #
 # Examples:
-#   ./setup.sh                          # Interactive mode
-#   ./setup.sh --auto                   # Auto-install with interactive config
-#   ./setup.sh --auto 640 60 y          # Auto-install with CLI args (640x512@60fps, confirm)
-#   ./setup.sh --auto 384 30 y          # Auto-install 384x288@30fps
+#   ./install.sh                          # Interactive mode
+#   ./install.sh --auto                   # Auto-install with interactive config
+#   ./install.sh --auto 640 60 y          # Auto-install with CLI args (640x512@60fps, confirm)
+#   ./install.sh --auto 384 30 y          # Auto-install 384x288@30fps
 
 set -e
 
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
             cat <<'EOF'
 RS300 Driver Installation Script
 
-Usage: ./setup.sh [OPTIONS] [RESOLUTION] [FPS] [CONFIRM]
+Usage: ./install.sh [OPTIONS] [RESOLUTION] [FPS] [CONFIRM]
 
 Options:
     --auto              Non-interactive mode (auto-install dependencies)
@@ -93,10 +93,10 @@ CLI Arguments (only with --auto):
     CONFIRM             y/Y for yes, anything else for no (defaults to interactive)
 
 Examples:
-    ./setup.sh                              # Interactive mode
-    ./setup.sh --auto                       # Auto-install with interactive config
-    ./setup.sh --auto 640 60 y              # Auto-install 640x512@60fps
-    ./setup.sh --auto 384 30 y              # Auto-install 384x288@30fps
+    ./install.sh                              # Interactive mode
+    ./install.sh --auto                       # Auto-install with interactive config
+    ./install.sh --auto 640 60 y              # Auto-install 640x512@60fps
+    ./install.sh --auto 384 30 y              # Auto-install 384x288@30fps
 
 This script installs:
   - RS300 kernel module via DKMS
