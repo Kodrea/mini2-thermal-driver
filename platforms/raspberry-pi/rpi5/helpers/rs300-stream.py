@@ -233,7 +233,6 @@ KEYMAP_HELP = """\
   c         cycle colormap (0..11)
   m         cycle scene_mode (0..5)
   a         toggle auto_shutter
-  y         toggle output_mode (YUV / Y16)
   + / -     brightness +/- 10
   ] / [     contrast +/- 5
   } / {     digital_detail_enhancement +/- 5
@@ -292,7 +291,11 @@ ACTIONS = {
     'colormap':     lambda: cycle_menu('colormap', 11),
     'scene':        lambda: cycle_menu('scene_mode', 5),
     'auto_shutter': lambda: toggle_bool('auto_shutter'),
-    'output_mode':  lambda: toggle_bool('output_mode'),
+    # 'output_mode': disabled. Toggling the sensor to Y16 desyncs it from this
+    # viewer, whose pipeline caps are fixed at YUY2 and whose CSI-2 pads are
+    # forced to 0x2011. Y16 needs the ISP path (a different capture node and
+    # extra media links), which this platform does not set up.
+    # 'output_mode':  lambda: toggle_bool('output_mode'),
     'bright_up':    lambda: bump('brightness',  10, 0, 100),
     'bright_dn':    lambda: bump('brightness', -10, 0, 100),
     'contrast_up':  lambda: bump('contrast',  5, 0, 100),
@@ -307,7 +310,7 @@ GDK_KEY_TO_ACTION = {
     Gdk.KEY_c: 'colormap', Gdk.KEY_C: 'colormap',
     Gdk.KEY_m: 'scene', Gdk.KEY_M: 'scene',
     Gdk.KEY_a: 'auto_shutter', Gdk.KEY_A: 'auto_shutter',
-    Gdk.KEY_y: 'output_mode', Gdk.KEY_Y: 'output_mode',
+    # Gdk.KEY_y: 'output_mode', Gdk.KEY_Y: 'output_mode',
     Gdk.KEY_plus: 'bright_up', Gdk.KEY_equal: 'bright_up',
     Gdk.KEY_minus: 'bright_dn', Gdk.KEY_underscore: 'bright_dn',
     Gdk.KEY_bracketright: 'contrast_up',
@@ -323,7 +326,7 @@ CHAR_TO_ACTION = {
     'c': 'colormap', 'C': 'colormap',
     'm': 'scene', 'M': 'scene',
     'a': 'auto_shutter', 'A': 'auto_shutter',
-    'y': 'output_mode', 'Y': 'output_mode',
+    # 'y': 'output_mode', 'Y': 'output_mode',
     '+': 'bright_up', '=': 'bright_up',
     '-': 'bright_dn', '_': 'bright_dn',
     ']': 'contrast_up',

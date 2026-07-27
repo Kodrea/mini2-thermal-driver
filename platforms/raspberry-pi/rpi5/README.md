@@ -75,7 +75,11 @@ The viewer auto-detects the sensor resolution (256x192, 384x288, or 640x512) at 
 | `c` | Cycle colormap (0..11) |
 | `m` | Cycle scene mode (0..5) |
 | `a` | Toggle auto shutter |
+<!-- Disabled. Toggling the sensor to Y16 desyncs it from the viewer, whose
+     pipeline is fixed at YUYV. Y16 needs the ISP capture path, which this
+     platform does not set up.
 | `y` | Toggle output mode (YUV / Y16) |
+-->
 | `+` / `-` | Brightness +10 / -10 |
 | `]` / `[` | Contrast +5 / -5 |
 | `}` / `{` | Digital detail enhancement +5 / -5 |
